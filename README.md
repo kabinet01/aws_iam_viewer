@@ -15,7 +15,7 @@ A Flask web application that allows you to upload and analyze AWS IAM account-au
 
 1. Clone this repository:
    ```
-   git clone https://github.com/kabinet01/aws_mapper
+   git clone https://github.com/kabinet01/aws_iam_viewer
    cd aws-iam-viewer
    ```
 
@@ -49,7 +49,3 @@ A Flask web application that allows you to upload and analyze AWS IAM account-au
 ## Security Note
 
 All processing is done locally in your browser. Your AWS data is not sent to any external servers.
-
-## License
-
-MIT 
