@@ -1,0 +1,15 @@
+<header>
+    <div class="header-container">
+        <h1>AWS IAM Authorization Details Viewer</h1>
+        <nav>
+            <a href="{{ url_for('index') }}" class="{% if request.endpoint == 'index' %}active{% endif %}">Home</a>
+            <a href="{{ url_for('list_uploads') }}" class="{% if request.endpoint == 'list_uploads' %}active{% endif %}">Uploaded Files</a>
+            {% if session.get('file_id') %}
+            <a href="{{ url_for('dashboard') }}" class="{% if request.endpoint == 'dashboard' %}active{% endif %}">Dashboard</a>
+            {% endif %}
+            {% if session.get('file_id') and request.endpoint != 'index' %}
+            <a href="{{ url_for('clear_session') }}">Upload New File</a>
+            {% endif %}
+        </nav>
+    </div>
+</header> 

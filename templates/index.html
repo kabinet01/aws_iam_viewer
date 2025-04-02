@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AWS IAM Authorization Details Viewer</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    {% include 'header.html' %}
+    
+    <div class="container">
+        <h1>AWS IAM Authorization Details Viewer</h1>
+        
+        <div class="upload-section">
+            <h2>Upload your account-authorization-details.json file</h2>
+            
+            {% with messages = get_flashed_messages() %}
+                {% if messages %}
+                    <div class="flash-messages">
+                        {% for message in messages %}
+                            <div class="flash-message">{{ message }}</div>
+                        {% endfor %}
+                    </div>
+                {% endif %}
+            {% endwith %}
+            
+            <form action="{{ url_for('upload_file') }}" method="post" enctype="multipart/form-data">
+                <div class="form-group">
+                    <label for="name">Name (optional):</label>
+                    <input type="text" name="name" id="name" placeholder="e.g., Production Account">
+                </div>
+                <div class="file-input-container">
+                    <input type="file" name="file" id="file" accept=".json">
+                    <label for="file">Choose a file</label>
+                </div>
+                <button type="submit" class="upload-button">Upload and Analyze</button>
+            </form>
+        </div>
+        
+        <div class="instructions">
+            <h3>How to get your account-authorization-details.json file:</h3>
+            <ol>
+                <li>Install the AWS CLI and configure it with appropriate credentials</li>
+                <li>Run the following command:
+                    <pre>aws iam get-account-authorization-details --output json > account-authorization-details.json</pre>
+                </li>
+                <li>Upload the generated file using the form above</li>
+            </ol>
+            <p class="note">Note: All processing is done in your browser. Your AWS data is not sent to any external servers.</p>
+        </div>
+    </div>
+    
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html> 

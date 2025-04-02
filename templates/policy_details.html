@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Policy Details - AWS IAM Authorization Details Viewer</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    {% include 'header.html' %}
+    
+    <div class="container">
+        <h1>Policy Details: {{ policy.PolicyName }}</h1>
+        
+        <div class="details-section">
+            <div class="details-card">
+                <h2>Policy Information</h2>
+                <table class="details-table">
+                    <tr>
+                        <th>Policy Name</th>
+                        <td>{{ policy.PolicyName }}</td>
+                    </tr>
+                    <tr>
+                        <th>ARN</th>
+                        <td>{{ policy.Arn }}</td>
+                    </tr>
+                    <tr>
+                        <th>Created</th>
+                        <td>{{ policy.CreateDate }}</td>
+                    </tr>
+                    <tr>
+                        <th>Attachment Count</th>
+                        <td>{{ policy.AttachmentCount }}</td>
+                    </tr>
+                    <tr>
+                        <th>Is Attachable</th>
+                        <td>{{ policy.IsAttachable }}</td>
+                    </tr>
+                    {% if policy.Description %}
+                    <tr>
+                        <th>Description</th>
+                        <td>{{ policy.Description }}</td>
+                    </tr>
+                    {% endif %}
+                </table>
+            </div>
+            
+            <div class="details-card">
+                <h2>Policy Document</h2>
+                {% if policy_document %}
+                <pre class="policy-document">{{ policy_document | tojson(indent=2) }}</pre>
+                {% else %}
+                <p class="no-data">Policy document not available</p>
+                {% endif %}
+            </div>
+            
+            <div class="details-card">
+                <h2>Attached to Users</h2>
+                {% if attached_users %}
+                <table class="details-table">
+                    <thead>
+                        <tr>
+                            <th>User Name</th>
+                            <th>ARN</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for user in attached_users %}
+                        <tr>
+                            <td>{{ user.UserName }}</td>
+                            <td class="arn">{{ user.Arn }}</td>
+                            <td>
+                                <a href="{{ url_for('user_details', user_id=user.UserId) }}" class="view-button">View User</a>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <p class="no-data">Not attached to any users</p>
+                {% endif %}
+            </div>
+            
+            <div class="details-card">
+                <h2>Attached to Roles</h2>
+                {% if attached_roles %}
+                <table class="details-table">
+                    <thead>
+                        <tr>
+                            <th>Role Name</th>
+                            <th>ARN</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for role in attached_roles %}
+                        <tr>
+                            <td>{{ role.RoleName }}</td>
+                            <td class="arn">{{ role.Arn }}</td>
+                            <td>
+                                <a href="{{ url_for('role_details', role_id=role.RoleId) }}" class="view-button">View Role</a>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <p class="no-data">Not attached to any roles</p>
+                {% endif %}
+            </div>
+            
+            <div class="details-card">
+                <h2>Attached to Groups</h2>
+                {% if attached_groups %}
+                <table class="details-table">
+                    <thead>
+                        <tr>
+                            <th>Group Name</th>
+                            <th>ARN</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for group in attached_groups %}
+                        <tr>
+                            <td>{{ group.GroupName }}</td>
+                            <td class="arn">{{ group.Arn }}</td>
+                            <td>
+                                <a href="{{ url_for('group_details', group_id=group.GroupId) }}" class="view-button">View Group</a>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <p class="no-data">Not attached to any groups</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html> 

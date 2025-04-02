@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IAM Dashboard - AWS IAM Authorization Details Viewer</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    {% include 'header.html' %}
+    
+    <div class="container">
+        {% with messages = get_flashed_messages() %}
+            {% if messages %}
+                <div class="flash-messages">
+                    {% for message in messages %}
+                        <div class="flash-message">{{ message }}</div>
+                    {% endfor %}
+                </div>
+            {% endif %}
+        {% endwith %}
+        
+        <h1>AWS IAM Authorization Details Dashboard</h1>
+        
+        <div class="dashboard-summary">
+            <div class="summary-card">
+                <h3>Users</h3>
+                <p class="count">{{ users|length }}</p>
+            </div>
+            <div class="summary-card">
+                <h3>Roles</h3>
+                <p class="count">{{ roles|length }}</p>
+            </div>
+            <div class="summary-card">
+                <h3>Policies</h3>
+                <p class="count">{{ policies|length }}</p>
+            </div>
+            <div class="summary-card">
+                <h3>Groups</h3>
+                <p class="count">{{ groups|length }}</p>
+            </div>
+        </div>
+        
+        <div class="dashboard-tabs">
+            <div class="tab-buttons">
+                <button class="tab-button active" data-tab="users">Users</button>
+                <button class="tab-button" data-tab="roles">Roles</button>
+                <button class="tab-button" data-tab="policies">Policies</button>
+                <button class="tab-button" data-tab="groups">Groups</button>
+            </div>
+            
+            <div class="tab-content">
+                <div class="tab-pane active" id="users-tab">
+                    <div class="search-container">
+                        <input type="text" id="user-search" placeholder="Search users...">
+                    </div>
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>User Name</th>
+                                <th>ARN</th>
+                                <th>Create Date</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for user_id, user in users.items() %}
+                            <tr>
+                                <td>{{ user.UserName }}</td>
+                                <td>
+                                    <span class="truncated-arn" data-full-arn="{{ user.Arn }}">
+                                        {{ user.Arn|truncate(40) }}
+                                    </span>
+                                </td>
+                                <td>{{ user.CreateDate }}</td>
+                                <td>
+                                    <a href="{{ url_for('user_details', user_id=user_id) }}" class="view-button">View Details</a>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                
+                <div class="tab-pane" id="roles-tab">
+                    <div class="search-container">
+                        <input type="text" id="role-search" placeholder="Search roles...">
+                    </div>
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Role Name</th>
+                                <th>ARN</th>
+                                <th>Create Date</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for role_id, role in roles.items() %}
+                            <tr>
+                                <td>{{ role.RoleName }}</td>
+                                <td>
+                                    <span class="truncated-arn" data-full-arn="{{ role.Arn }}">
+                                        {{ role.Arn|truncate(40) }}
+                                    </span>
+                                </td>
+                                <td>{{ role.CreateDate }}</td>
+                                <td>
+                                    <a href="{{ url_for('role_details', role_id=role_id) }}" class="view-button">View Details</a>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                
+                <div class="tab-pane" id="policies-tab">
+                    <div class="search-container">
+                        <input type="text" id="policy-search" placeholder="Search policies...">
+                    </div>
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Policy Name</th>
+                                <th>ARN</th>
+                                <th>Create Date</th>
+                                <th>Attachment Count</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for policy_id, policy in policies.items() %}
+                            <tr>
+                                <td>{{ policy.PolicyName }}</td>
+                                <td>
+                                    <span class="truncated-arn" data-full-arn="{{ policy.Arn }}">
+                                        {{ policy.Arn|truncate(40) }}
+                                    </span>
+                                </td>
+                                <td>{{ policy.CreateDate }}</td>
+                                <td>{{ policy.AttachmentCount }}</td>
+                                <td>
+                                    <a href="{{ url_for('policy_details', policy_id=policy_id) }}" class="view-button">View Details</a>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                
+                <div class="tab-pane" id="groups-tab">
+                    <div class="search-container">
+                        <input type="text" id="group-search" placeholder="Search groups...">
+                    </div>
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Group Name</th>
+                                <th>ARN</th>
+                                <th>Create Date</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for group_id, group in groups.items() %}
+                            <tr>
+                                <td>{{ group.GroupName }}</td>
+                                <td>
+                                    <span class="truncated-arn" data-full-arn="{{ group.Arn }}">
+                                        {{ group.Arn|truncate(40) }}
+                                    </span>
+                                </td>
+                                <td>{{ group.CreateDate }}</td>
+                                <td>
+                                    <a href="{{ url_for('group_details', group_id=group_id) }}" class="view-button">View Details</a>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html> 

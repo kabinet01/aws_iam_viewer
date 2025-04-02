@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>User Details - AWS IAM Authorization Details Viewer</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    {% include 'header.html' %}
+    
+    <div class="container">
+        <h1>User Details: {{ user.UserName }}</h1>
+        
+        <div class="details-section">
+            <div class="details-card">
+                <h2>User Information</h2>
+                <table class="details-table">
+                    <tr>
+                        <th>User Name</th>
+                        <td>{{ user.UserName }}</td>
+                    </tr>
+                    <tr>
+                        <th>ARN</th>
+                        <td>{{ user.Arn }}</td>
+                    </tr>
+                    <tr>
+                        <th>Created</th>
+                        <td>{{ user.CreateDate }}</td>
+                    </tr>
+                </table>
+                
+                {% if user.Tags %}
+                <div class="tags-section">
+                    <h3>Tags</h3>
+                    <div class="tags-container">
+                        {% for tag in user.Tags %}
+                        <div class="tag">
+                            <span class="tag-key">{{ tag.Key }}</span>
+                            <span class="tag-value">{{ tag.Value }}</span>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+            
+            <div class="details-card">
+                <h2>Group Memberships</h2>
+                {% if groups %}
+                <table class="details-table">
+                    <thead>
+                        <tr>
+                            <th>Group Name</th>
+                            <th>ARN</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for group in groups %}
+                        <tr>
+                            <td>{{ group.GroupName }}</td>
+                            <td class="arn">{{ group.Arn }}</td>
+                            <td>
+                                <a href="{{ url_for('group_details', group_id=group.GroupId) }}" class="view-button">View Group</a>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <p class="no-data">User is not a member of any groups</p>
+                {% endif %}
+            </div>
+            
+            <div class="details-card">
+                <h2>Attached Policies</h2>
+                {% if policies %}
+                <table class="details-table">
+                    <thead>
+                        <tr>
+                            <th>Policy Name</th>
+                            <th>ARN</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for policy in policies %}
+                        <tr>
+                            <td>{{ policy.PolicyName }}</td>
+                            <td class="arn">{{ policy.Arn }}</td>
+                            <td>
+                                <a href="{{ url_for('policy_details', policy_id=policy.PolicyId) }}" class="view-button">View Policy</a>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <p class="no-data">No policies directly attached to this user</p>
+                {% endif %}
+            </div>
+            
+            <div class="details-card">
+                <h2>Inline Policies</h2>
+                {% if user.UserPolicyList %}
+                <div class="accordion">
+                    {% for policy in user.UserPolicyList %}
+                    <div class="accordion-item">
+                        <div class="accordion-header">{{ policy.PolicyName }}</div>
+                        <div class="accordion-content">
+                            <pre class="policy-document">{{ policy.PolicyDocument | tojson(indent=2) }}</pre>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <p class="no-data">No inline policies defined for this user</p>
+                {% endif %}
+            </div>
+            
+            <div class="details-card">
+                <h2>Assumable Roles</h2>
+                {% if assumable_roles %}
+                <table class="details-table">
+                    <thead>
+                        <tr>
+                            <th>Role Name</th>
+                            <th>ARN</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for role in assumable_roles %}
+                        <tr>
+                            <td>{{ role.RoleName }}</td>
+                            <td class="arn">{{ role.Arn }}</td>
+                            <td>
+                                <a href="{{ url_for('role_details', role_id=role.RoleId) }}" class="view-button">View Role</a>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <p class="no-data">User cannot assume any roles</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html> 
