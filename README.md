@@ -1,6 +1,6 @@
 # AWS IAM Viewer
 
-A Flask web application that allows you to upload and analyze AWS IAM account-authorization-details.json files to better understand your AWS IAM configuration.
+A NextJS that allows you to upload and analyze AWS IAM account-authorization-details.json files to better understand your AWS IAM configuration.
 
 ## Features
 
@@ -14,36 +14,38 @@ A Flask web application that allows you to upload and analyze AWS IAM account-au
 ## Installation
 
 1. Clone this repository:
-   ```
+
+   ```bash
    git clone https://github.com/kabinet01/aws_iam_viewer
+   cd aws_iam_viewer
+   ```
+
+2. Run the docker container
+
+   ```bash
+   docker compose up --build
+   ```
+
+   Alternatively:
+
+   ```bash
    cd aws-iam-viewer
+   npm install 
+   npm run build
+   npm run start
    ```
 
-2. Create a virtual environment and activate it:
-   ```
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
-
-3. Install the required packages:
-   ```
-   pip install -r requirements.txt
-   ```
-
-4. Run the application:
-   ```
-   python app.py
-   ```
-
-5. Open your browser and navigate to `http://127.0.0.1:5000`
+3. Open your browser and navigate to `http://127.0.0.1:5000`
 
 ## How to Get Your AWS IAM Authorization Details
 
 1. Install and configure the AWS CLI with appropriate credentials
 2. Run the following command:
-   ```
+
+   ```bash
    aws iam get-account-authorization-details --output json > account-authorization-details.json
    ```
+
 3. Upload the generated file using the web interface
 
 ## Security Note

@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  aws-iam-viewer:
+    build:
+      context: ./
+      dockerfile: ./Dockerfile
+    container_name: aws-iam-viewer
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - NEXT_TELEMETRY_DISABLED=1
+    restart: unless-stopped
+    networks:
+      - aws-iam-viewer-network
+
+
+networks:
+  aws-iam-viewer-network:
+    driver: bridge 
