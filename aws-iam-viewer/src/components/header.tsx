@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { Button } from '@/components/ui/button';
-import { Upload, Home, Database, FileText } from 'lucide-react';
+import { Upload, Home, Database, FileText, Network } from 'lucide-react';
 import { ThemeToggle } from '@/components/theme-toggle';
 
 export function Header() {
@@ -48,6 +48,17 @@ export function Header() {
               >
                 <Database className="h-4 w-4" />
                 <span>Dashboard</span>
+              </Button>
+            </Link>
+            
+            <Link href="/graph">
+              <Button 
+                variant={pathname === '/graph' ? 'default' : 'ghost'} 
+                size="sm"
+                className="flex items-center space-x-2"
+              >
+                <Network className="h-4 w-4" />
+                <span>Graph</span>
               </Button>
             </Link>
             

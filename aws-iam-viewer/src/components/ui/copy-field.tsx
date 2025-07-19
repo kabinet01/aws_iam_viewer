@@ -33,7 +33,7 @@ export function CopyField({ value, displayValue, className, children }: CopyFiel
       onClick={handleCopy}
       title={`Click to copy: ${value}`}
     >
-      {children || <span>{displayValue || value}</span>}
+      {children || <span className="break-all">{displayValue || value}</span>}
       <div className="opacity-0 group-hover:opacity-100 transition-opacity">
         {copied ? (
           <Check className="h-3 w-3 text-green-600" />
