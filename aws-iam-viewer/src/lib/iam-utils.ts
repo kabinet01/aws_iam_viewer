@@ -124,6 +124,72 @@ export function findAssumableRoles(user: IAMUser, roles: Record<string, IAMRole>
   return assumableRoles;
 }
 
+export function findAssumableRolesForRole(role: IAMRole, allRoles: Record<string, IAMRole>): IAMRole[] {
+  const assumableRoles: IAMRole[] = [];
+
+  for (const targetRole of Object.values(allRoles)) {
+    // Skip the role itself
+    if (targetRole.RoleId === role.RoleId) continue;
+    
+    const assumeRolePolicy = targetRole.AssumeRolePolicyDocument;
+    const statements = assumeRolePolicy?.Statement || [];
+
+    for (const statement of statements) {
+      if (statement.Effect !== 'Allow') continue;
+
+      const principal = statement.Principal;
+      const awsPrincipal = principal?.AWS;
+
+      if (!awsPrincipal) continue;
+
+      const principalArns = Array.isArray(awsPrincipal) ? awsPrincipal : [awsPrincipal];
+
+      for (const principalArn of principalArns) {
+        if (role.Arn === principalArn || principalArn === '*') {
+          assumableRoles.push(targetRole);
+          break;
+        }
+      }
+    }
+  }
+
+  return assumableRoles;
+}
+
+export function findRoleAssumptionChain(role: IAMRole, allRoles: Record<string, IAMRole>): IAMRole[] {
+  const chainRoles = new Set<IAMRole>();
+  const visited = new Set<string>();
+  
+  function traverseRole(roleId: string) {
+    if (visited.has(roleId)) return;
+    visited.add(roleId);
+    
+    const currentRole = allRoles[roleId];
+    if (!currentRole) return;
+    
+    chainRoles.add(currentRole);
+    
+    // Find roles that this role can assume (downstream)
+    const assumableRoles = findAssumableRolesForRole(currentRole, allRoles);
+    for (const assumableRole of assumableRoles) {
+      traverseRole(assumableRole.RoleId);
+    }
+    
+    // Find roles that can assume this role (upstream)
+    for (const otherRole of Object.values(allRoles)) {
+      if (otherRole.RoleId !== roleId) {
+        const otherRoleAssumableRoles = findAssumableRolesForRole(otherRole, allRoles);
+        if (otherRoleAssumableRoles.some(r => r.RoleId === roleId)) {
+          traverseRole(otherRole.RoleId);
+        }
+      }
+    }
+  }
+  
+  traverseRole(role.RoleId);
+  return Array.from(chainRoles);
+}
+
 export function findAttachedEntities(
   policyArn: string,
   data: ProcessedIAMData

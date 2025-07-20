@@ -8,13 +8,16 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { CopyField } from '@/components/ui/copy-field';
 import { ArrowLeft, Shield, FileText } from 'lucide-react';
 import { IAMRole, ProcessedIAMData, IAMPolicy } from '@/lib/types';
-import { formatDateTime } from '@/lib/iam-utils';
+import { formatDateTime, findAssumableRolesForRole, findRoleAssumptionChain } from '@/lib/iam-utils';
 import { JSONViewer } from '@/components/ui/json-viewer';
 
 export default function RoleDetailsPage() {
   const [role, setRole] = useState<IAMRole | null>(null);
   const [data, setData] = useState<ProcessedIAMData | null>(null);
   const [rolePolicies, setRolePolicies] = useState<IAMPolicy[]>([]);
+  const [assumableRoles, setAssumableRoles] = useState<IAMRole[]>([]);
+  const [rolesThatCanAssume, setRolesThatCanAssume] = useState<IAMRole[]>([]);
+  const [assumptionChain, setAssumptionChain] = useState<IAMRole[]>([]);
   const router = useRouter();
   const params = useParams();
   const roleId = params.roleId as string;
@@ -50,6 +53,22 @@ export default function RoleDetailsPage() {
     }).filter((policy: unknown): policy is IAMPolicy => policy !== undefined);
 
     setRolePolicies(policies);
+
+    // Get roles that this role can assume
+    const assumableRoles = findAssumableRolesForRole(roleData, upload.data.roles);
+    setAssumableRoles(assumableRoles);
+
+    // Get roles that can assume this role
+    const rolesThatCanAssume = Object.values(upload.data.roles).filter(otherRole => {
+      if (otherRole.RoleId === roleData.RoleId) return false;
+      const otherRoleAssumableRoles = findAssumableRolesForRole(otherRole, upload.data.roles);
+      return otherRoleAssumableRoles.some(r => r.RoleId === roleData.RoleId);
+    });
+    setRolesThatCanAssume(rolesThatCanAssume);
+
+    // Get the complete assumption chain
+    const chain = findRoleAssumptionChain(roleData, upload.data.roles);
+    setAssumptionChain(chain);
   }, [roleId, router]);
 
   if (!role || !data) {
@@ -140,6 +159,173 @@ export default function RoleDetailsPage() {
               <p className="text-muted-foreground">Assume role policy not available</p>
             )}
           </div>
+        </section>
+
+        {/* Roles This Role Can Assume */}
+        <section>
+          <h2 className="text-2xl font-semibold mb-4 flex items-center space-x-2">
+            <Shield className="h-5 w-5" />
+            <span>Roles This Role Can Assume</span>
+            <span className="text-sm font-normal text-muted-foreground">
+              ({assumableRoles.length} role{assumableRoles.length !== 1 ? 's' : ''})
+            </span>
+          </h2>
+          {assumableRoles.length > 0 ? (
+            <div className="bg-muted/50 rounded-lg p-6">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Role Name</TableHead>
+                    <TableHead>ARN</TableHead>
+                    <TableHead>Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {assumableRoles.map((assumableRole) => (
+                    <TableRow key={assumableRole.RoleId}>
+                      <TableCell className="font-medium">
+                        <CopyField value={assumableRole.RoleName}>
+                          {assumableRole.RoleName}
+                        </CopyField>
+                      </TableCell>
+                      <TableCell>
+                        <CopyField value={assumableRole.Arn}>
+                          <span className="font-mono text-sm">{assumableRole.Arn}</span>
+                        </CopyField>
+                      </TableCell>
+                      <TableCell>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => router.push(`/role/${assumableRole.RoleId}`)}
+                        >
+                          View Role
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          ) : (
+            <div className="bg-muted/50 rounded-lg p-6">
+              <p className="text-muted-foreground">This role cannot assume any other roles</p>
+            </div>
+          )}
+        </section>
+
+        {/* Roles That Can Assume This Role */}
+        <section>
+          <h2 className="text-2xl font-semibold mb-4 flex items-center space-x-2">
+            <Shield className="h-5 w-5" />
+            <span>Roles That Can Assume This Role</span>
+            <span className="text-sm font-normal text-muted-foreground">
+              ({rolesThatCanAssume.length} role{rolesThatCanAssume.length !== 1 ? 's' : ''})
+            </span>
+          </h2>
+          {rolesThatCanAssume.length > 0 ? (
+            <div className="bg-muted/50 rounded-lg p-6">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Role Name</TableHead>
+                    <TableHead>ARN</TableHead>
+                    <TableHead>Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {rolesThatCanAssume.map((assumingRole) => (
+                    <TableRow key={assumingRole.RoleId}>
+                      <TableCell className="font-medium">
+                        <CopyField value={assumingRole.RoleName}>
+                          {assumingRole.RoleName}
+                        </CopyField>
+                      </TableCell>
+                      <TableCell>
+                        <CopyField value={assumingRole.Arn}>
+                          <span className="font-mono text-sm">{assumingRole.Arn}</span>
+                        </CopyField>
+                      </TableCell>
+                      <TableCell>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => router.push(`/role/${assumingRole.RoleId}`)}
+                        >
+                          View Role
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          ) : (
+            <div className="bg-muted/50 rounded-lg p-6">
+              <p className="text-muted-foreground">No other roles can assume this role</p>
+            </div>
+          )}
+        </section>
+
+        {/* Complete Assumption Chain */}
+        <section>
+          <h2 className="text-2xl font-semibold mb-4 flex items-center space-x-2">
+            <Shield className="h-5 w-5" />
+            <span>Complete Assumption Chain</span>
+            <span className="text-sm font-normal text-muted-foreground">
+              ({assumptionChain.length} role{assumptionChain.length !== 1 ? 's' : ''} in chain)
+            </span>
+          </h2>
+          {assumptionChain.length > 1 ? (
+            <div className="bg-muted/50 rounded-lg p-6">
+              <div className="mb-4">
+                <p className="text-sm text-muted-foreground mb-2">
+                  This role is part of an assumption chain. Clicking any role in this chain will show all related roles and their relationships.
+                </p>
+              </div>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Role Name</TableHead>
+                    <TableHead>ARN</TableHead>
+                    <TableHead>Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {assumptionChain.map((chainRole) => (
+                    <TableRow key={chainRole.RoleId}>
+                      <TableCell className="font-medium">
+                        <CopyField value={chainRole.RoleName}>
+                          {chainRole.RoleName}
+                          {chainRole.RoleId === role.RoleId && (
+                            <Badge variant="secondary" className="ml-2">Current</Badge>
+                          )}
+                        </CopyField>
+                      </TableCell>
+                      <TableCell>
+                        <CopyField value={chainRole.Arn}>
+                          <span className="font-mono text-sm">{chainRole.Arn}</span>
+                        </CopyField>
+                      </TableCell>
+                      <TableCell>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => router.push(`/role/${chainRole.RoleId}`)}
+                        >
+                          View Role
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          ) : (
+            <div className="bg-muted/50 rounded-lg p-6">
+              <p className="text-muted-foreground">This role is not part of an assumption chain</p>
+            </div>
+          )}
         </section>
 
         {/* Attached Policies */}

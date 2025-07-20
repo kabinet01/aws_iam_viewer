@@ -29,7 +29,7 @@ import { JSONViewer } from '@/components/ui/json-viewer';
 import { Input } from '@/components/ui/input';
 import { ProcessedIAMData, IAMUser, IAMRole, IAMPolicy, IAMGroup } from '@/lib/types';
 import { Network, Users, Shield, FileText, UserCheck, ExternalLink, Filter, Check, ChevronDown, Search, X, RotateCcw } from 'lucide-react';
-import { formatDateTime, findAttachedEntities, findAssumableRoles } from '@/lib/iam-utils';
+import { formatDateTime, findAttachedEntities, findAssumableRoles, findAssumableRolesForRole, findRoleAssumptionChain } from '@/lib/iam-utils';
 
 // Node types with different colors
 const nodeTypes = {
@@ -225,23 +225,53 @@ export default function GraphPage() {
     } else if (filterType === 'role') {
       const selectedRole = iamData.roles[filterEntityId];
       if (selectedRole) {
-        relatedRoles.push(selectedRole);
-        
-        // Add policies attached to role
-        selectedRole.AttachedManagedPolicies.forEach(policy => {
-          const policyObj = Object.values(iamData.policies).find(p => p.Arn === policy.PolicyArn);
-          if (policyObj && !relatedPolicies.find(p => p.PolicyId === policyObj.PolicyId)) {
-            relatedPolicies.push(policyObj);
+        // Find all roles in the assumption chain
+        const chainRoles = findRoleAssumptionChain(selectedRole, iamData.roles);
+        chainRoles.forEach(role => {
+          if (!relatedRoles.find(r => r.RoleId === role.RoleId)) {
+            relatedRoles.push(role);
           }
+          
+          // Add policies attached to all roles in the chain
+          role.AttachedManagedPolicies.forEach(policy => {
+            const policyObj = Object.values(iamData.policies).find(p => p.Arn === policy.PolicyArn);
+            if (policyObj && !relatedPolicies.find(p => p.PolicyId === policyObj.PolicyId)) {
+              relatedPolicies.push(policyObj);
+            }
+          });
         });
         
-        // Add users who can assume this role
+        // Add users who can assume any role in the chain
         Object.values(iamData.users).forEach(user => {
           const assumableRoles = findAssumableRoles(user, iamData.roles);
-          if (assumableRoles.some(role => role.RoleId === selectedRole.RoleId)) {
+          if (assumableRoles.some(role => chainRoles.some(chainRole => chainRole.RoleId === role.RoleId))) {
             if (!relatedUsers.find(u => u.UserId === user.UserId)) {
               relatedUsers.push(user);
             }
+            
+            // Add policies directly attached to users who can assume roles in the chain
+            user.AttachedManagedPolicies.forEach(policy => {
+              const policyObj = Object.values(iamData.policies).find(p => p.Arn === policy.PolicyArn);
+              if (policyObj && !relatedPolicies.find(p => p.PolicyId === policyObj.PolicyId)) {
+                relatedPolicies.push(policyObj);
+              }
+            });
+            
+            // Add groups that users belong to and their policies
+            user.GroupList.forEach(groupName => {
+              const group = Object.values(iamData.groups).find(g => g.GroupName === groupName);
+              if (group && !relatedGroups.find(g => g.GroupId === group.GroupId)) {
+                relatedGroups.push(group);
+                
+                // Add policies from groups
+                group.AttachedManagedPolicies.forEach(policy => {
+                  const policyObj = Object.values(iamData.policies).find(p => p.Arn === policy.PolicyArn);
+                  if (policyObj && !relatedPolicies.find(p => p.PolicyId === policyObj.PolicyId)) {
+                    relatedPolicies.push(policyObj);
+                  }
+                });
+              }
+            });
           }
         });
       }
@@ -503,7 +533,7 @@ export default function GraphPage() {
             type: 'default',
             animated: false,
             style: { stroke: nodeTypes.policy.color, strokeWidth: 2, strokeDasharray: '5,5' },
-            markerEnd: { type: MarkerType.ArrowClosed, color: nodeTypes.policy.color },
+            markerStart: { type: MarkerType.ArrowClosed, color: nodeTypes.policy.color },
             label: 'attached to',
           });
         }
@@ -522,7 +552,7 @@ export default function GraphPage() {
             type: 'bezier',
             animated: false,
             style: { stroke: nodeTypes.policy.color, strokeWidth: 2, strokeDasharray: '5,5' },
-            markerEnd: { type: MarkerType.ArrowClosed, color: nodeTypes.policy.color },
+            markerStart: { type: MarkerType.ArrowClosed, color: nodeTypes.policy.color },
             label: 'attached to',
           });
         }
@@ -542,7 +572,7 @@ export default function GraphPage() {
             type: 'default',
             animated: false,
             style: { stroke: nodeTypes.policy.color, strokeWidth: 2, strokeDasharray: '5,5' },
-            markerEnd: { type: MarkerType.ArrowClosed, color: nodeTypes.policy.color },
+            markerStart: { type: MarkerType.ArrowClosed, color: nodeTypes.policy.color },
             label: 'attached to',
           });
         }
@@ -562,6 +592,29 @@ export default function GraphPage() {
             id: `user-${user.UserId}-assume-role-${role.RoleId}`,
             source: `user-${user.UserId}`,
             target: `role-${role.RoleId}`,
+            type: 'bezier',
+            animated: false,
+            style: { stroke: '#8B5CF6', strokeWidth: 2, strokeDasharray: '10,5' },
+            markerEnd: { type: MarkerType.ArrowClosed, color: '#8B5CF6' },
+            label: 'can assume',
+          });
+        }
+      });
+    });
+
+    // Create edges for role -> role relationships (role assumption)
+    rolesToShow.forEach((role) => {
+      const assumableRoles = findAssumableRolesForRole(role, Object.fromEntries(
+        rolesToShow.map(r => [r.RoleId, r])
+      ));
+      assumableRoles.forEach((targetRole) => {
+        const targetRoleInGraph = rolesToShow.find(r => r.RoleId === targetRole.RoleId);
+        if (targetRoleInGraph) {
+          // Create role->role edge for assumable roles
+          newEdges.push({
+            id: `role-${role.RoleId}-assume-role-${targetRole.RoleId}`,
+            source: `role-${role.RoleId}`,
+            target: `role-${targetRole.RoleId}`,
             type: 'bezier',
             animated: false,
             style: { stroke: '#8B5CF6', strokeWidth: 2, strokeDasharray: '10,5' },
