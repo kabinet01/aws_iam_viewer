@@ -35,7 +35,7 @@ export function JSONViewer({ data, className }: JSONViewerProps) {
 
       // Handle strings
       if (char === '"') {
-        let string = '';
+        let string = '"'; // Start with opening quote
         let isKey = false;
         current++; // Skip opening quote
         
