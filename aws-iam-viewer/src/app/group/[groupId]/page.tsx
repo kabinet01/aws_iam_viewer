@@ -5,11 +5,13 @@ import { useRouter, useParams } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { CopyField } from '@/components/ui/copy-field';
+import { Skeleton } from '@/components/ui/skeleton';
 import { ArrowLeft, UserCheck, FileText, Users } from 'lucide-react';
 import { IAMGroup, ProcessedIAMData, IAMUser, IAMPolicy } from '@/lib/types';
 import { formatDateTime, findGroupUsers } from '@/lib/iam-utils';
 import { JSONViewer } from '@/components/ui/json-viewer';
 import { indexedDBService } from '@/lib/indexeddb';
+import { Breadcrumb } from '@/components/breadcrumb';
 
 export default function GroupDetailsPage() {
   const [group, setGroup] = useState<IAMGroup | null>(null);
@@ -66,16 +68,27 @@ export default function GroupDetailsPage() {
 
   if (!group || !data) {
     return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <div className="text-center">
-          <p className="text-muted-foreground">Loading...</p>
+      <div className="max-w-6xl mx-auto space-y-8 overflow-hidden">
+        <Breadcrumb />
+        <div className="flex items-center space-x-4">
+          <Skeleton className="h-9 w-24" />
+          <div className="space-y-2">
+            <Skeleton className="h-8 w-64" />
+            <Skeleton className="h-4 w-80" />
+          </div>
+        </div>
+        <div className="space-y-6">
+          <Skeleton className="h-64 w-full" />
+          <Skeleton className="h-48 w-full" />
+          <Skeleton className="h-48 w-full" />
         </div>
       </div>
     );
   }
 
   return (
-    <div className="max-w-4xl mx-auto space-y-8">
+    <div className="max-w-6xl mx-auto space-y-8 overflow-hidden">
+      <Breadcrumb />
       <div className="flex items-center space-x-4">
         <Button variant="outline" onClick={() => router.back()}>
           <ArrowLeft className="h-4 w-4 mr-2" />

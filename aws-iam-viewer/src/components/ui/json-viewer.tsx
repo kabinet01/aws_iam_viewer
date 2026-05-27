@@ -147,7 +147,7 @@ export function JSONViewer({ data, className }: JSONViewerProps) {
 
   return (
     <div className={cn(
-      "json-viewer p-4 border rounded-md bg-background font-mono text-xs leading-relaxed overflow-x-auto whitespace-pre",
+      "json-viewer p-4 border bg-background font-mono text-xs leading-relaxed overflow-x-auto whitespace-pre-wrap break-all",
       className
     )}>
       {tokens.map((token, index) => renderToken(token, index))}

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import ReactFlow, {
   Node,
@@ -21,6 +21,7 @@ import 'reactflow/dist/style.css';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -28,10 +29,12 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { CopyField } from '@/components/ui/copy-field';
 import { JSONViewer } from '@/components/ui/json-viewer';
 import { Input } from '@/components/ui/input';
+import { Breadcrumb } from '@/components/breadcrumb';
 import { ProcessedIAMData, IAMUser, IAMRole, IAMPolicy, IAMGroup } from '@/lib/types';
-import { Network, Users, Shield, FileText, UserCheck, ExternalLink, Filter, Check, ChevronDown, Search, X, RotateCcw } from 'lucide-react';
+import { Network, Users, Shield, FileText, UserCheck, ExternalLink, Filter, Check, ChevronDown, Search, X, RotateCcw, AlertTriangle } from 'lucide-react';
 import { formatDateTime, findAttachedEntities, findAssumableRoles, findAssumableRolesForRole, findRoleAssumptionChain } from '@/lib/iam-utils';
 import { indexedDBService } from '@/lib/indexeddb';
+import { analyzePolicyForPrivesc, CATEGORY_LABELS } from '@/lib/privesc';
 
 // Node types with different colors
 const nodeTypes = {
@@ -382,6 +385,25 @@ export default function GraphPage() {
     };
   }, []);
 
+  // Precompute privesc risk for all non-AWS policies
+  const policyRiskMap = useMemo(() => {
+    if (!data) return {};
+    const riskMap: Record<string, number> = {};
+    for (const policy of Object.values(data.policies)) {
+      if (policy.Arn.includes("::aws:policy/")) continue;
+      const defaultVersion = policy.PolicyVersionList?.find(
+        (v) => v.VersionId === policy.DefaultVersionId
+      );
+      if (defaultVersion?.Document) {
+        const matches = analyzePolicyForPrivesc(defaultVersion.Document);
+        if (matches.length > 0) {
+          riskMap[policy.PolicyId] = matches.length;
+        }
+      }
+    }
+    return riskMap;
+  }, [data]);
+
   // Build filtered graph data from IAM data
   const buildGraphData = useCallback((iamData: ProcessedIAMData, filters: string[] = []) => {
     const newNodes: Node[] = [];
@@ -533,6 +555,7 @@ export default function GraphPage() {
       const importance = calculateNodeImportance(policy, 'policy');
       const nodeHeight = 60 + Math.min(importance * 3, 40);
       const nodeWidth = 280 + Math.min(importance * 8, 120);
+      const isRisky = (policyRiskMap[policy.PolicyId] || 0) > 0;
 
       newNodes.push({
         id: `policy-${policy.PolicyId}`,
@@ -540,19 +563,26 @@ export default function GraphPage() {
         position: { x: 0, y: 0 }, // Will be set by dagre
         data: {
           label: (
-            <div className="flex items-center justify-center p-2 h-full w-full">
+            <div className="flex items-center justify-center p-2 h-full w-full relative">
               <span className="text-xs font-medium text-center leading-tight break-words max-w-full overflow-hidden">{policy.PolicyName}</span>
+              {isRisky && (
+                <span className="absolute -top-1 -right-1 flex h-3 w-3">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-3 w-3 bg-red-500"></span>
+                </span>
+              )}
             </div>
           ),
         },
         style: {
-          background: nodeTypes.policy.bgColor,
-          border: `2px solid ${nodeTypes.policy.color}`,
+          background: isRisky ? '#FEE2E2' : nodeTypes.policy.bgColor,
+          border: isRisky ? '2px solid #DC2626' : `2px solid ${nodeTypes.policy.color}`,
           borderRadius: '6px',
           width: nodeWidth,
           height: nodeHeight,
           fontSize: '12px',
           cursor: 'pointer',
+          boxShadow: isRisky ? '0 0 8px rgba(220, 38, 38, 0.4)' : undefined,
         },
         sourcePosition: Position.Right,
         targetPosition: Position.Left,
@@ -754,43 +784,53 @@ export default function GraphPage() {
     // Apply dagre layout
     const layouted = getLayoutedElements(newNodes, newEdges);
     return layouted;
-  }, [getRelatedEntities, hideAWSPolicies, relationshipFilters, highlightedEdges, calculateNodeImportance, getLayoutedElements]);
+  }, [getRelatedEntities, hideAWSPolicies, relationshipFilters, highlightedEdges, calculateNodeImportance, getLayoutedElements, policyRiskMap]);
 
   useEffect(() => {
+    let timeoutId: ReturnType<typeof setTimeout>;
+    let cancelled = false;
+
     const loadCurrentUpload = async () => {
       try {
         const currentUploadId = await indexedDBService.getCurrentUploadId();
-        if (!currentUploadId) {
-          router.push('/');
+        if (cancelled || !currentUploadId) {
+          if (!currentUploadId) router.push('/');
           return;
         }
 
         const upload = await indexedDBService.getUpload(currentUploadId);
-        if (!upload) {
-          router.push('/');
+        if (cancelled || !upload) {
+          if (!upload) router.push('/');
           return;
         }
+
+        if (cancelled) return;
 
         setCurrentUpload(upload);
         setData(upload.data);
 
-        // Build graph data
         const { nodes: graphNodes, edges: graphEdges } = buildGraphData(upload.data, selectedFilters);
+        if (cancelled) return;
+
         setNodes(graphNodes);
         setEdges(graphEdges);
         setIsLoading(false);
 
-        // Auto-fit view when filters change (after a short delay to ensure layout is complete)
-        setTimeout(() => {
+        timeoutId = setTimeout(() => {
           reactFlowInstance?.fitView({ padding: 0.2, duration: 800 });
         }, 100);
       } catch (error) {
         console.error('Failed to load current upload:', error);
-        router.push('/');
+        if (!cancelled) router.push('/');
       }
     };
 
     loadCurrentUpload();
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+    };
   }, [router, buildGraphData, setNodes, setEdges, selectedFilters, hideAWSPolicies, relationshipFilters, reactFlowInstance]);
 
   // Keyboard shortcuts
@@ -846,10 +886,13 @@ export default function GraphPage() {
 
   if (isLoading || !data || !currentUpload) {
     return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <div className="text-center">
-          <Network className="h-12 w-12 mx-auto mb-4 text-muted-foreground animate-pulse" />
-          <p className="text-muted-foreground">Loading graph...</p>
+      <div className="max-w-6xl mx-auto space-y-6">
+        <Breadcrumb />
+        <div className="flex items-center justify-center min-h-[400px]">
+          <div className="text-center">
+            <Network className="h-12 w-12 mx-auto mb-4 text-muted-foreground animate-pulse" />
+            <p className="text-muted-foreground">Loading graph...</p>
+          </div>
         </div>
       </div>
     );
@@ -858,7 +901,8 @@ export default function GraphPage() {
   const { users, roles, policies, groups } = data;
 
   return (
-    <div className="space-y-6">
+    <div className="max-w-6xl mx-auto space-y-6">
+      <Breadcrumb />
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <div>
@@ -1576,7 +1620,7 @@ export default function GraphPage() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">
-              {edges.filter(edge => edge.label === 'attached to').length}
+              {edges.filter(edge => edge.data?.label === 'attached to').length}
             </div>
           </CardContent>
         </Card>
@@ -1587,7 +1631,7 @@ export default function GraphPage() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">
-              {edges.filter(edge => edge.label === 'member of').length}
+              {edges.filter(edge => edge.data?.label === 'member of').length}
             </div>
           </CardContent>
         </Card>
@@ -1690,6 +1734,49 @@ export default function GraphPage() {
                   )}
                 </CardContent>
               </Card>
+
+              {/* Policy Privesc Alert */}
+              {selectedNode.type === 'policy' && (() => {
+                const policy = selectedNode.data as IAMPolicy;
+                const defaultVersion = policy.PolicyVersionList?.find(v => v.VersionId === policy.DefaultVersionId);
+                const matches = defaultVersion?.Document ? analyzePolicyForPrivesc(defaultVersion.Document) : [];
+                if (matches.length === 0) return null;
+                return (
+                  <Alert variant="destructive">
+                    <AlertTriangle className="h-4 w-4" />
+                    <AlertTitle className="font-bold">
+                      Privilege Escalation Risk Detected ({matches.length} path{matches.length > 1 ? "s" : ""})
+                    </AlertTitle>
+                    <AlertDescription>
+                      <div className="space-y-2 mt-2">
+                        {matches.slice(0, 3).map((match) => (
+                          <div key={match.path.id} className="border-l-2 border-destructive/50 pl-3">
+                            <div className="flex items-center gap-2">
+                              <Badge variant="destructive" className="text-xs">
+                                {CATEGORY_LABELS[match.path.category] || match.path.category}
+                              </Badge>
+                              <span className="font-semibold text-sm">{match.path.name}</span>
+                            </div>
+                            <p className="text-xs text-muted-foreground mt-1">
+                              {match.path.description.slice(0, 200)}...
+                            </p>
+                          </div>
+                        ))}
+                        {matches.length > 3 && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="text-xs"
+                            onClick={() => router.push(`/policy/${(selectedNode.data as IAMPolicy).PolicyId}`)}
+                          >
+                            View all {matches.length} paths on policy page <ExternalLink className="h-3 w-3 ml-1" />
+                          </Button>
+                        )}
+                      </div>
+                    </AlertDescription>
+                  </Alert>
+                );
+              })()}
 
               {/* Attached Policies */}
               {(selectedNode.type === 'user' || selectedNode.type === 'group' || selectedNode.type === 'role') && (

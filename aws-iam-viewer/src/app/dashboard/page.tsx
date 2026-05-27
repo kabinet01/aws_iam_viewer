@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -9,10 +9,13 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 import { CopyField } from '@/components/ui/copy-field';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Breadcrumb } from '@/components/breadcrumb';
 import { Search, Users, Shield, FileText, UserCheck } from 'lucide-react';
 import { ProcessedIAMData, IAMRole, IAMPolicy } from '@/lib/types';
 import { formatDateTime, truncateArn } from '@/lib/iam-utils';
 import { indexedDBService } from '@/lib/indexeddb';
+import { analyzePolicyForPrivesc } from '@/lib/privesc';
 
 export default function DashboardPage() {
   const [data, setData] = useState<ProcessedIAMData | null>(null);
@@ -20,6 +23,26 @@ export default function DashboardPage() {
   const [searchTerm, setSearchTerm] = useState('');
   const [activeTab, setActiveTab] = useState('users');
   const router = useRouter();
+
+  // Precompute privesc risk for all non-AWS policies
+  const policyRiskMap = useMemo(() => {
+    const riskMap: Record<string, number> = {};
+    if (!data) return riskMap;
+    for (const policy of Object.values(data.policies)) {
+      // Skip AWS managed policies
+      if (policy.Arn.includes("::aws:policy/")) continue;
+      const defaultVersion = policy.PolicyVersionList?.find(
+        (v) => v.VersionId === policy.DefaultVersionId
+      );
+      if (defaultVersion?.Document) {
+        const matches = analyzePolicyForPrivesc(defaultVersion.Document);
+        if (matches.length > 0) {
+          riskMap[policy.Arn] = matches.length;
+        }
+      }
+    }
+    return riskMap;
+  }, [data]);
 
   useEffect(() => {
     const loadCurrentUpload = async () => {
@@ -49,10 +72,16 @@ export default function DashboardPage() {
 
   if (!data || !currentUpload) {
     return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <div className="text-center">
-          <p className="text-muted-foreground">Loading...</p>
+      <div className="max-w-6xl mx-auto space-y-6">
+        <Breadcrumb />
+        <Skeleton className="h-10 w-48" />
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+          {[...Array(4)].map((_, i) => (
+            <Skeleton key={i} className="h-24 w-full" />
+          ))}
         </div>
+        <Skeleton className="h-12 w-full" />
+        <Skeleton className="h-64 w-full" />
       </div>
     );
   }
@@ -139,7 +168,8 @@ export default function DashboardPage() {
   );
 
   return (
-    <div className="space-y-6">
+    <div className="max-w-6xl mx-auto space-y-6">
+      <Breadcrumb />
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold">IAM Dashboard</h1>
@@ -431,11 +461,14 @@ export default function DashboardPage() {
                       <TableHead>ARN</TableHead>
                       <TableHead>Create Date</TableHead>
                       <TableHead>Attachment Count</TableHead>
+                      <TableHead>Risk</TableHead>
                       <TableHead>Actions</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {filteredUserPolicies.map(([policyId, policy]) => (
+                    {filteredUserPolicies.map(([policyId, policy]) => {
+                      const riskCount = policyRiskMap[policy.Arn] || 0;
+                      return (
                       <TableRow key={policyId}>
                         <TableCell className="font-medium">
                           <CopyField value={policy.PolicyName}>
@@ -454,8 +487,17 @@ export default function DashboardPage() {
                           <Badge variant="secondary">{policy.AttachmentCount}</Badge>
                         </TableCell>
                         <TableCell>
-                          <Button 
-                            variant="outline" 
+                          {riskCount > 0 ? (
+                            <Badge variant="destructive" className="text-xs">
+                              {riskCount} path{riskCount > 1 ? "s" : ""}
+                            </Badge>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">None</span>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <Button
+                            variant="outline"
                             size="sm"
                             onClick={() => router.push(`/policy/${policyId}`)}
                           >
@@ -463,7 +505,8 @@ export default function DashboardPage() {
                           </Button>
                         </TableCell>
                       </TableRow>
-                    ))}
+                      );
+                    })}
                   </TableBody>
                 </Table>
               ) : (

@@ -1,16 +1,20 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { CopyField } from '@/components/ui/copy-field';
-import { ArrowLeft, Shield, FileText } from 'lucide-react';
+import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
+import { Skeleton } from '@/components/ui/skeleton';
+import { ArrowLeft, Shield, FileText, AlertTriangle, ExternalLink } from 'lucide-react';
 import { IAMRole, ProcessedIAMData, IAMPolicy } from '@/lib/types';
 import { formatDateTime, findAssumableRolesForRole, findRoleAssumptionChain } from '@/lib/iam-utils';
 import { JSONViewer } from '@/components/ui/json-viewer';
 import { indexedDBService } from '@/lib/indexeddb';
+import { analyzeEntityPolicies, EntityPrivescResult, CATEGORY_LABELS } from '@/lib/privesc';
+import { Breadcrumb } from '@/components/breadcrumb';
 
 export default function RoleDetailsPage() {
   const [role, setRole] = useState<IAMRole | null>(null);
@@ -79,18 +83,49 @@ export default function RoleDetailsPage() {
     loadRoleData();
   }, [roleId, router]);
 
+  const privescResults = useMemo((): EntityPrivescResult[] => {
+    if (!role) return [];
+    const managedPolicies = rolePolicies.map((p) => ({
+      PolicyName: p.PolicyName,
+      Arn: p.Arn,
+      PolicyVersionList: p.PolicyVersionList,
+      DefaultVersionId: p.DefaultVersionId,
+    }));
+    const inlinePolicies = (role.RolePolicyList || []).map((p) => ({
+      PolicyName: p.PolicyName,
+      PolicyDocument: p.PolicyDocument,
+    }));
+    return analyzeEntityPolicies(managedPolicies as Parameters<typeof analyzeEntityPolicies>[0], inlinePolicies);
+  }, [role, rolePolicies]);
+
+  const allMatches = useMemo(
+    () => privescResults.flatMap((r) => r.matches),
+    [privescResults]
+  );
+
   if (!role || !data) {
     return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <div className="text-center">
-          <p className="text-muted-foreground">Loading...</p>
+      <div className="max-w-6xl mx-auto space-y-8 overflow-hidden">
+        <Breadcrumb />
+        <div className="flex items-center space-x-4">
+          <Skeleton className="h-9 w-24" />
+          <div className="space-y-2">
+            <Skeleton className="h-8 w-64" />
+            <Skeleton className="h-4 w-80" />
+          </div>
+        </div>
+        <div className="space-y-6">
+          <Skeleton className="h-64 w-full" />
+          <Skeleton className="h-48 w-full" />
+          <Skeleton className="h-48 w-full" />
         </div>
       </div>
     );
   }
 
   return (
-    <div className="max-w-4xl mx-auto space-y-8">
+    <div className="max-w-6xl mx-auto space-y-8 overflow-hidden">
+      <Breadcrumb />
       <div className="flex items-center space-x-4">
         <Button variant="outline" onClick={() => router.back()}>
           <ArrowLeft className="h-4 w-4 mr-2" />
@@ -101,6 +136,66 @@ export default function RoleDetailsPage() {
           <p className="text-muted-foreground">Comprehensive role information and permissions</p>
         </div>
       </div>
+
+      {/* Privilege Escalation Warning */}
+      {allMatches.length > 0 && (
+        <Alert variant="destructive">
+          <AlertTriangle className="h-5 w-5" />
+          <AlertTitle className="text-lg font-bold">
+            Privilege Escalation Risk Detected
+          </AlertTitle>
+          <AlertDescription>
+            <p className="mt-2 mb-3">
+              This role has policies that match {allMatches.length} known privilege escalation
+              {allMatches.length > 1 ? ' paths' : ' path'} across {privescResults.length} policy document
+              {privescResults.length > 1 ? 's' : ''}. See{" "}
+              <a
+                href="https://pathfinding.cloud/paths/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline inline-flex items-center gap-1"
+              >
+                pathfinding.cloud <ExternalLink className="h-3 w-3" />
+              </a>{" "}
+              for details:
+            </p>
+            <div className="space-y-3 mt-3">
+              {privescResults.map((result, i) => (
+                <div key={i}>
+                  <p className="text-sm font-semibold mb-2">
+                    {result.policyType === "inline" ? "Inline" : "Managed"} Policy: {result.policyName}
+                    {result.policyArn && (
+                      <span className="font-mono text-xs ml-2 text-muted-foreground">({result.policyArn})</span>
+                    )}
+                  </p>
+                  {result.matches.map((match) => (
+                    <div key={match.path.id} className="border-l-2 border-destructive/50 pl-4 mb-2">
+                      <div className="flex items-center gap-2 mb-1">
+                        <Badge variant="destructive" className="text-xs">
+                          {CATEGORY_LABELS[match.path.category] || match.path.category}
+                        </Badge>
+                        <span className="font-semibold text-sm">{match.path.name}</span>
+                        {match.allRequiredPresent ? (
+                          <Badge variant="destructive" className="text-xs">All required permissions present</Badge>
+                        ) : (
+                          <Badge variant="secondary" className="text-xs">
+                            Missing: {match.missingPermissions.join(", ")}
+                          </Badge>
+                        )}
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        {match.path.description.length > 200
+                          ? match.path.description.slice(0, 200) + "..."
+                          : match.path.description}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </AlertDescription>
+        </Alert>
+      )}
 
       <div className="space-y-8">
         {/* Role Information */}
@@ -352,11 +447,16 @@ export default function RoleDetailsPage() {
                   <TableRow>
                     <TableHead>Policy Name</TableHead>
                     <TableHead>ARN</TableHead>
+                    <TableHead>Risk</TableHead>
                     <TableHead>Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {rolePolicies.map((policy) => (
+                  {rolePolicies.map((policy) => {
+                    const policyRisk = privescResults.find(
+                      (r) => r.policyArn === policy.Arn
+                    );
+                    return (
                     <TableRow key={policy.PolicyId}>
                       <TableCell className="font-medium">
                         <CopyField value={policy.PolicyName}>
@@ -369,6 +469,15 @@ export default function RoleDetailsPage() {
                         </CopyField>
                       </TableCell>
                       <TableCell>
+                        {policyRisk ? (
+                          <Badge variant="destructive" className="text-xs">
+                            {policyRisk.matches.length} path{policyRisk.matches.length > 1 ? "s" : ""}
+                          </Badge>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">None</span>
+                        )}
+                      </TableCell>
+                      <TableCell>
                         <Button
                           variant="outline"
                           size="sm"
@@ -378,7 +487,8 @@ export default function RoleDetailsPage() {
                         </Button>
                       </TableCell>
                     </TableRow>
-                  ))}
+                    );
+                  })}
                 </TableBody>
               </Table>
             </div>

@@ -67,15 +67,6 @@ export interface ProcessedIAMData {
   groups: Record<string, IAMGroup>;
 }
 
-export interface UploadMetadata {
-  id: string;
-  name: string;
-  original_filename: string;
-  filepath: string;
-  uploaded_at: string;
-  size: number;
-}
-
 export interface RawIAMData {
   UserDetailList: IAMUser[];
   RoleDetailList: IAMRole[];

@@ -7,9 +7,13 @@ import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Breadcrumb } from '@/components/breadcrumb';
 import { FileText, Upload, Trash2, Database } from 'lucide-react';
 import { formatDateTime, formatFileSize } from '@/lib/iam-utils';
 import { indexedDBService, UploadMetadata } from '@/lib/indexeddb';
+import { toast } from 'sonner';
 
 
 
@@ -17,6 +21,7 @@ export default function UploadsPage() {
   const [uploads, setUploads] = useState<Record<string, UploadMetadata>>({});
   const [currentUploadId, setCurrentUploadId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const router = useRouter();
 
   useEffect(() => {
@@ -47,27 +52,32 @@ export default function UploadsPage() {
     try {
       await indexedDBService.setCurrentUploadId(uploadId);
       setCurrentUploadId(uploadId);
+      const name = uploads[uploadId]?.name || uploadId;
+      toast.success(`Switched to: ${name}`);
       router.push('/dashboard');
     } catch (error) {
       console.error('Failed to switch upload:', error);
+      toast.error('Failed to switch upload');
     }
   };
 
   const handleDeleteUpload = async (uploadId: string) => {
     try {
+      const name = uploads[uploadId]?.name || uploadId;
       await indexedDBService.deleteUpload(uploadId);
-      
+
       const updatedUploads = { ...uploads };
       delete updatedUploads[uploadId];
       setUploads(updatedUploads);
-      
-      // If we deleted the current upload, clear it
+
       if (currentUploadId === uploadId) {
         await indexedDBService.setCurrentUploadId(null);
         setCurrentUploadId(null);
       }
+      toast.success(`Deleted: ${name}`);
     } catch (error) {
       console.error('Failed to delete upload:', error);
+      toast.error('Failed to delete upload');
     }
   };
 
@@ -77,19 +87,17 @@ export default function UploadsPage() {
 
   if (isLoading) {
     return (
-      <div className="max-w-4xl mx-auto space-y-6">
+      <div className="max-w-6xl mx-auto space-y-6">
+        <Breadcrumb />
         <div className="flex items-center justify-between">
-          <h1 className="text-3xl font-bold">Uploaded Files</h1>
-          <Button onClick={() => router.push('/')}>
-            <Upload className="h-4 w-4 mr-2" />
-            Upload New File
-          </Button>
+          <Skeleton className="h-10 w-48" />
+          <Skeleton className="h-9 w-36" />
         </div>
-
         <Card>
-          <CardContent className="flex flex-col items-center justify-center py-12">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mb-4"></div>
-            <p className="text-muted-foreground">Loading uploads...</p>
+          <CardContent className="py-8">
+            {[...Array(3)].map((_, i) => (
+              <Skeleton key={i} className="h-12 w-full mb-2" />
+            ))}
           </CardContent>
         </Card>
       </div>
@@ -98,7 +106,8 @@ export default function UploadsPage() {
 
   if (sortedUploads.length === 0) {
     return (
-      <div className="max-w-4xl mx-auto space-y-6">
+      <div className="max-w-6xl mx-auto space-y-6">
+        <Breadcrumb />
         <div className="flex items-center justify-between">
           <h1 className="text-3xl font-bold">Uploaded Files</h1>
           <Button onClick={() => router.push('/')}>
@@ -126,6 +135,7 @@ export default function UploadsPage() {
 
   return (
     <div className="max-w-6xl mx-auto space-y-6">
+      <Breadcrumb />
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">Uploaded Files</h1>
         <Button onClick={() => router.push('/')}>
@@ -187,7 +197,7 @@ export default function UploadsPage() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => handleDeleteUpload(uploadId)}
+                        onClick={() => setDeleteConfirmId(uploadId)}
                       >
                         <Trash2 className="h-4 w-4 mr-1" />
                         Delete
@@ -216,6 +226,34 @@ export default function UploadsPage() {
           </AlertDescription>
         </Alert>
       )}
+
+      <Dialog open={!!deleteConfirmId} onOpenChange={(open) => !open && setDeleteConfirmId(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete Upload</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete <strong>{uploads[deleteConfirmId || '']?.name || 'this upload'}</strong>?
+              This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDeleteConfirmId(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                if (deleteConfirmId) {
+                  handleDeleteUpload(deleteConfirmId);
+                  setDeleteConfirmId(null);
+                }
+              }}
+            >
+              Delete
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 } 

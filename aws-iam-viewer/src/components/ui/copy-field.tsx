@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { Copy, Check } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { toast } from 'sonner';
 
 interface CopyFieldProps {
   value: string;
@@ -16,32 +17,26 @@ export function CopyField({ value, displayValue, className, children }: CopyFiel
 
   const handleCopy = async () => {
     try {
-      // Check if clipboard API is available
       if (navigator && navigator.clipboard && navigator.clipboard.writeText) {
         await navigator.clipboard.writeText(value);
         setCopied(true);
+        toast.success('Copied to clipboard');
         setTimeout(() => setCopied(false), 2000);
       } else {
-        // Fallback using document.execCommand (deprecated but works in some browsers)
         const textArea = document.createElement('textarea');
         textArea.value = value;
-        
-        // Make the textarea out of viewport
         textArea.style.position = 'fixed';
         textArea.style.left = '-999999px';
         textArea.style.top = '-999999px';
         document.body.appendChild(textArea);
         textArea.focus();
         textArea.select();
-        
         const successful = document.execCommand('copy');
         document.body.removeChild(textArea);
-        
         if (successful) {
           setCopied(true);
+          toast.success('Copied to clipboard');
           setTimeout(() => setCopied(false), 2000);
-        } else {
-          console.error('Fallback clipboard copy failed');
         }
       }
     } catch (err) {
@@ -56,7 +51,7 @@ export function CopyField({ value, displayValue, className, children }: CopyFiel
         className
       )}
       onClick={handleCopy}
-      title={`Click to copy: ${value}`}
+      title="Click to copy"
     >
       {children || <span className="break-all">{displayValue || value}</span>}
       <div className="opacity-0 group-hover:opacity-100 transition-opacity">

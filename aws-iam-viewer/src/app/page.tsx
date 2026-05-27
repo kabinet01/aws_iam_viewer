@@ -1,25 +1,21 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef, type DragEvent } from 'react';
 import { useRouter } from 'next/navigation';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Upload, Terminal, Shield } from 'lucide-react';
+import { Upload, Terminal, Shield, ArrowRight, FileJson } from 'lucide-react';
 import { processAuthDetails } from '@/lib/iam-utils';
 import { RawIAMData } from '@/lib/types';
 import { indexedDBService } from '@/lib/indexeddb';
+import { toast } from 'sonner';
 
-// UUID generation function with fallback for environments without crypto.randomUUID
 function generateUUID(): string {
-  // Use crypto.randomUUID if available
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return crypto.randomUUID();
   }
-  
-  // Fallback implementation for browsers without crypto.randomUUID
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
     const r = Math.random() * 16 | 0;
     const v = c === 'x' ? r : (r & 0x3 | 0x8);
@@ -32,63 +28,44 @@ export default function HomePage() {
   const [name, setName] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState('');
+  const [isDragOver, setIsDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
+
+  const selectFile = (selectedFile: File) => {
+    if (selectedFile.name.endsWith('.json')) {
+      setFile(selectedFile);
+      setError('');
+    } else {
+      setError('Please upload a JSON file');
+      setFile(null);
+    }
+  };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
-    if (selectedFile) {
-      if (selectedFile.name.endsWith('.json')) {
-        setFile(selectedFile);
-        setError('');
-      } else {
-        setError('Please upload a JSON file');
-        setFile(null);
-      }
-    }
+    if (selectedFile) selectFile(selectedFile);
+  };
+
+  const handleDragEnter = (e: DragEvent) => { e.preventDefault(); e.stopPropagation(); setIsDragOver(true); };
+  const handleDragLeave = (e: DragEvent) => { e.preventDefault(); e.stopPropagation(); setIsDragOver(false); };
+  const handleDragOver = (e: DragEvent) => { e.preventDefault(); e.stopPropagation(); };
+  const handleDrop = (e: DragEvent) => {
+    e.preventDefault(); e.stopPropagation();
+    setIsDragOver(false);
+    const droppedFile = e.dataTransfer.files?.[0];
+    if (droppedFile) selectFile(droppedFile);
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    if (!file) {
-      setError('Please select a file');
-      return;
-    }
-
+    if (!file) { setError('Please select a file'); return; }
     setIsLoading(true);
     setError('');
-
     try {
-      console.log('Starting file processing...');
-      console.log('File size:', file.size, 'bytes');
-      console.log('File name:', file.name);
-      
       const text = await file.text();
-      console.log('File text loaded, length:', text.length);
-      console.log('First 500 characters:', text.substring(0, 500));
-      
-      console.log('Attempting to parse JSON...');
       const data: RawIAMData = JSON.parse(text);
-      console.log('JSON parsed successfully');
-      console.log('Data structure:', {
-        UserDetailList: data.UserDetailList?.length || 0,
-        RoleDetailList: data.RoleDetailList?.length || 0,
-        Policies: data.Policies?.length || 0,
-        GroupDetailList: data.GroupDetailList?.length || 0
-      });
-      
-      console.log('Processing data with processAuthDetails...');
       const processedData = processAuthDetails(data);
-      console.log('Data processing completed successfully');
-      console.log('Processed data structure:', {
-        users: Object.keys(processedData.users).length,
-        roles: Object.keys(processedData.roles).length,
-        policies: Object.keys(processedData.policies).length,
-        groups: Object.keys(processedData.groups).length
-      });
-      
-      // Create upload data for IndexedDB storage
-      // Use crypto.randomUUID() with fallback for environments where it's not available
       const uploadId = generateUUID();
       const uploadData = {
         id: uploadId,
@@ -96,36 +73,18 @@ export default function HomePage() {
         originalFilename: file.name,
         uploadedAt: new Date().toISOString(),
         size: file.size,
-        data: processedData
+        data: processedData,
       };
-
-      console.log('Storing data in IndexedDB...');
-      // Store data in IndexedDB
       await indexedDBService.saveUpload(uploadData);
-      
-      // Set current upload
       await indexedDBService.setCurrentUploadId(uploadId);
-      
-      console.log('Upload completed successfully, navigating to dashboard...');
-      // Navigate to dashboard
+      toast.success('Upload complete! Navigating to dashboard...');
       router.push('/dashboard');
     } catch (error: unknown) {
-      console.error('Error during file processing:', error);
-      
-      if (error instanceof Error) {
-        console.error('Error details:', {
-          name: error.name,
-          message: error.message,
-          stack: error.stack
-        });
-        
-        if (error instanceof SyntaxError) {
-          setError(`JSON parsing error: ${error.message}`);
-        } else {
-          setError(`Processing error: ${error.message}`);
-        }
+      if (error instanceof SyntaxError) {
+        setError(`JSON parsing error: ${error.message}`);
+      } else if (error instanceof Error) {
+        setError(`Processing error: ${error.message}`);
       } else {
-        console.error('Unknown error type:', error);
         setError('Error processing file. Please ensure it\'s a valid account-authorization-details.json file.');
       }
     } finally {
@@ -134,96 +93,184 @@ export default function HomePage() {
   };
 
   return (
-    <div className="max-w-4xl mx-auto space-y-8">
-      <div className="text-center space-y-4">
-        <h1 className="text-4xl font-bold">AWS IAM Authorization Details Viewer</h1>
-        <p className="text-xl text-muted-foreground">
-          Upload and analyze your AWS IAM authorization details
-        </p>
+    <div className="max-w-2xl mx-auto space-y-16 py-12">
+      {/* Hero — Brutalist typography with terminal angle */}
+      <div className="space-y-8">
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 text-xs font-mono text-muted-foreground uppercase tracking-[0.2em]">
+            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+            <span>AWS Security Analysis Tool</span>
+          </div>
+          <h1 className="text-5xl font-bold leading-[1.05] tracking-tight">
+            <span className="text-foreground">Audit your</span>
+            <br />
+            <span className="text-amber-500">IAM permissions</span>
+            <span className="text-muted-foreground">.</span>
+          </h1>
+          <p className="text-base text-muted-foreground max-w-lg leading-relaxed">
+            Upload an <code className="font-mono text-xs bg-secondary px-1.5 py-0.5 text-amber-500/80">
+              account-authorization-details.json
+            </code> file. Everything runs locally in your browser — no data leaves your machine.
+          </p>
+        </div>
+
+        {/* Stats row — decorative */}
+        <div className="flex gap-6 text-xs font-mono text-muted-foreground/60">
+          <div className="flex items-center gap-2">
+            <span className="text-amber-500/60">01</span>
+            <span>Upload JSON</span>
+          </div>
+          <span className="text-muted-foreground/30">→</span>
+          <div className="flex items-center gap-2">
+            <span className="text-muted-foreground/40">02</span>
+            <span>Analyze Locally</span>
+          </div>
+          <span className="text-muted-foreground/30">→</span>
+          <div className="flex items-center gap-2">
+            <span className="text-muted-foreground/40">03</span>
+            <span>Audit & Fix</span>
+          </div>
+        </div>
       </div>
 
-      <Card className="max-w-2xl mx-auto">
-        <CardHeader>
-          <CardTitle className="flex items-center space-x-2">
-            <Upload className="h-5 w-5" />
-            <span>Upload your account-authorization-details.json file</span>
-          </CardTitle>
-          <CardDescription>
-            Select your JSON file to begin analyzing your IAM resources
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleSubmit} className="space-y-6">
+      {/* Upload Card — Sharp edges, border accent */}
+      <div className="border border-border bg-card">
+        {/* Card header accent bar */}
+        <div className="h-1 bg-gradient-to-r from-amber-500 via-amber-500/50 to-transparent" />
+
+        <div className="p-8 space-y-6">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center justify-center w-8 h-8 bg-amber-500/10">
+              <FileJson className="h-4 w-4 text-amber-500" />
+            </div>
+            <div>
+              <h2 className="font-bold text-sm uppercase tracking-wider">Upload IAM Data</h2>
+              <p className="text-xs text-muted-foreground">account-authorization-details.json</p>
+            </div>
+          </div>
+
+          <form onSubmit={handleSubmit} className="space-y-5">
             {error && (
-              <Alert variant="destructive">
-                <AlertDescription>{error}</AlertDescription>
+              <Alert variant="destructive" className="border-l-2 border-l-destructive">
+                <AlertDescription className="font-mono text-xs">{error}</AlertDescription>
               </Alert>
             )}
 
             <div className="space-y-2">
-              <Label htmlFor="name">Name (optional)</Label>
+              <Label htmlFor="name" className="text-xs font-mono uppercase tracking-wider text-muted-foreground">
+                Upload Name <span className="text-muted-foreground/40">(optional)</span>
+              </Label>
               <Input
                 id="name"
                 type="text"
                 placeholder="e.g., Production Account"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
+                className="font-mono text-sm bg-secondary/50 border-border focus:border-amber-500/50 transition-colors"
               />
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="file">JSON File</Label>
-              <Input
-                id="file"
-                type="file"
-                accept=".json"
-                onChange={handleFileChange}
-                required
-              />
-              {file && (
-                <p className="text-sm text-muted-foreground">
-                  Selected: {file.name} ({file.size} bytes)
-                </p>
-              )}
+              <Label htmlFor="file" className="text-xs font-mono uppercase tracking-wider text-muted-foreground">
+                JSON File
+              </Label>
+              <div
+                className={`border-2 border-dashed p-10 text-center cursor-pointer transition-all duration-150 ${
+                  isDragOver
+                    ? 'border-amber-500 bg-amber-500/5 scale-[1.01]'
+                    : file
+                      ? 'border-emerald-500/40 bg-emerald-500/5'
+                      : 'border-border hover:border-amber-500/30 hover:bg-secondary/30'
+                }`}
+                onClick={() => fileInputRef.current?.click()}
+                onDragEnter={handleDragEnter}
+                onDragLeave={handleDragLeave}
+                onDragOver={handleDragOver}
+                onDrop={handleDrop}
+              >
+                <div className={`mb-3 transition-transform duration-150 ${isDragOver ? 'scale-110' : ''}`}>
+                  {file ? (
+                    <FileJson className="h-10 w-10 mx-auto text-emerald-500" />
+                  ) : (
+                    <Upload className={`h-10 w-10 mx-auto ${isDragOver ? 'text-amber-500' : 'text-muted-foreground/40'}`} />
+                  )}
+                </div>
+                {file ? (
+                  <div className="space-y-1">
+                    <p className="text-sm font-mono font-medium text-foreground">{file.name}</p>
+                    <p className="text-xs font-mono text-muted-foreground">
+                      {(file.size / 1024).toFixed(1)} KB — Click or drop to change
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium text-foreground">
+                      {isDragOver ? 'Drop your file here' : 'Drag & drop your JSON file here'}
+                    </p>
+                    <p className="text-xs font-mono text-muted-foreground">
+                      or click to browse
+                    </p>
+                  </div>
+                )}
+                <Input
+                  ref={fileInputRef}
+                  id="file"
+                  type="file"
+                  accept=".json"
+                  onChange={handleFileChange}
+                  required
+                  className="hidden"
+                />
+              </div>
             </div>
 
-            <Button 
-              type="submit" 
-              className="w-full" 
+            <Button
+              type="submit"
               disabled={isLoading || !file}
+              className="w-full h-11 font-bold text-sm uppercase tracking-wider bg-amber-500 hover:bg-amber-400 text-black transition-all disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              {isLoading ? 'Processing...' : 'Upload and Analyze'}
+              {isLoading ? (
+                <span className="flex items-center gap-2">
+                  <span className="animate-spin h-4 w-4 border-2 border-black/30 border-t-black rounded-full" />
+                  Processing...
+                </span>
+              ) : (
+                <span className="flex items-center gap-2">
+                  Upload and Analyze
+                  <ArrowRight className="h-4 w-4" />
+                </span>
+              )}
             </Button>
           </form>
-        </CardContent>
-      </Card>
+        </div>
+      </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center space-x-2">
-            <Terminal className="h-5 w-5" />
-            <span>How to get your account-authorization-details.json file</span>
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <ol className="list-decimal list-inside space-y-2 text-sm">
-            <li>Install the AWS CLI and configure it with appropriate credentials</li>
-            <li>Run the following command:
-              <pre className="mt-2 p-3 bg-muted rounded-md overflow-x-auto">
-                aws iam get-account-authorization-details --output json &gt; account-authorization-details.json
-              </pre>
-            </li>
-            <li>Upload the generated file using the form above</li>
-          </ol>
-          
-          <Alert>
-            <Shield className="h-4 w-4" />
-            <AlertDescription>
-              <strong>Note:</strong> All processing is done in your browser. Your AWS data is not sent to any external servers.
+      {/* Instructions — Minimal, mono */}
+      <div className="border border-border bg-card/50">
+        <div className="p-8 space-y-4">
+          <div className="flex items-center gap-3">
+            <Terminal className="h-4 w-4 text-muted-foreground" />
+            <h3 className="font-bold text-sm uppercase tracking-wider">CLI Instructions</h3>
+          </div>
+          <div className="font-mono text-xs text-muted-foreground space-y-2">
+            <p className="flex items-center gap-2">
+              <span className="text-amber-500/60">$</span>
+              <span>aws iam get-account-authorization-details</span>
+              <span className="text-muted-foreground/50">--output json</span>
+              <span className="text-muted-foreground/50">&gt;</span>
+              <span className="text-emerald-500/60">account-authorization-details.json</span>
+            </p>
+          </div>
+
+          <Alert className="border-l-2 border-l-amber-500/50 bg-amber-500/5">
+            <Shield className="h-4 w-4 text-amber-500" />
+            <AlertDescription className="text-xs">
+              <span className="text-amber-500 font-bold">LOCAL ONLY:</span> All processing happens in your browser.
+              No data is sent to external servers. Your AWS credentials and IAM data remain on your machine.
             </AlertDescription>
           </Alert>
-        </CardContent>
-      </Card>
+        </div>
+      </div>
     </div>
   );
 }

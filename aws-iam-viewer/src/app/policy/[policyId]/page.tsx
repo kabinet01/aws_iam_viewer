@@ -6,11 +6,15 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { CopyField } from '@/components/ui/copy-field';
-import { ArrowLeft, FileText, Users, Shield, UserCheck } from 'lucide-react';
+import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
+import { Skeleton } from '@/components/ui/skeleton';
+import { ArrowLeft, FileText, Users, Shield, UserCheck, AlertTriangle, ExternalLink } from 'lucide-react';
 import { IAMPolicy, ProcessedIAMData, IAMUser, IAMRole, IAMGroup } from '@/lib/types';
 import { formatDateTime, findAttachedEntities } from '@/lib/iam-utils';
 import { JSONViewer } from '@/components/ui/json-viewer';
 import { indexedDBService } from '@/lib/indexeddb';
+import { analyzePolicyForPrivesc, PrivescMatch, CATEGORY_LABELS } from '@/lib/privesc';
+import { Breadcrumb } from '@/components/breadcrumb';
 
 export default function PolicyDetailsPage() {
   const [policy, setPolicy] = useState<IAMPolicy | null>(null);
@@ -19,6 +23,7 @@ export default function PolicyDetailsPage() {
   const [attachedUsers, setAttachedUsers] = useState<IAMUser[]>([]);
   const [attachedRoles, setAttachedRoles] = useState<IAMRole[]>([]);
   const [attachedGroups, setAttachedGroups] = useState<IAMGroup[]>([]);
+  const [privescMatches, setPrivescMatches] = useState<PrivescMatch[]>([]);
   const router = useRouter();
   const params = useParams();
   const policyId = params.policyId as string;
@@ -53,6 +58,12 @@ export default function PolicyDetailsPage() {
         )?.Document || null;
         setPolicyDocument(document);
 
+        // Analyze for privilege escalation
+        if (document) {
+          const matches = analyzePolicyForPrivesc(document);
+          setPrivescMatches(matches);
+        }
+
         // Find attached entities
         const { users, roles, groups } = findAttachedEntities(policyData.Arn, upload.data);
         setAttachedUsers(users);
@@ -69,16 +80,27 @@ export default function PolicyDetailsPage() {
 
   if (!policy || !data) {
     return (
-      <div className="flex items-center justify-center min-h-[400px]">
-        <div className="text-center">
-          <p className="text-muted-foreground">Loading...</p>
+      <div className="max-w-6xl mx-auto space-y-8 overflow-hidden">
+        <Breadcrumb />
+        <div className="flex items-center space-x-4">
+          <Skeleton className="h-9 w-24" />
+          <div className="space-y-2">
+            <Skeleton className="h-8 w-64" />
+            <Skeleton className="h-4 w-80" />
+          </div>
+        </div>
+        <div className="space-y-6">
+          <Skeleton className="h-64 w-full" />
+          <Skeleton className="h-48 w-full" />
+          <Skeleton className="h-48 w-full" />
         </div>
       </div>
     );
   }
 
   return (
-    <div className="max-w-4xl mx-auto space-y-8">
+    <div className="max-w-6xl mx-auto space-y-8 overflow-hidden">
+      <Breadcrumb />
       <div className="flex items-center space-x-4">
         <Button variant="outline" onClick={() => router.back()}>
           <ArrowLeft className="h-4 w-4 mr-2" />
@@ -89,6 +111,76 @@ export default function PolicyDetailsPage() {
           <p className="text-muted-foreground">Comprehensive policy information and attachments</p>
         </div>
       </div>
+
+      {/* Privilege Escalation Warning */}
+      {privescMatches.length > 0 && (
+        <Alert variant="destructive">
+          <AlertTriangle className="h-5 w-5" />
+          <AlertTitle className="text-lg font-bold">
+            Privilege Escalation Risk Detected
+          </AlertTitle>
+          <AlertDescription>
+            <p className="mt-2 mb-3">
+              This policy grants permissions that match {privescMatches.length} known privilege escalation
+              {privescMatches.length > 1 ? ' paths' : ' path'} from{" "}
+              <a
+                href="https://pathfinding.cloud/paths/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline inline-flex items-center gap-1"
+              >
+                pathfinding.cloud <ExternalLink className="h-3 w-3" />
+              </a>:
+            </p>
+            <div className="space-y-4 mt-3">
+              {privescMatches.map((match) => (
+                <div key={match.path.id} className="border-l-2 border-destructive/50 pl-4">
+                  <div className="flex items-center gap-2 mb-1">
+                    <Badge variant="destructive" className="text-xs">
+                      {CATEGORY_LABELS[match.path.category] || match.path.category}
+                    </Badge>
+                    <span className="font-semibold">{match.path.name}</span>
+                    {match.allRequiredPresent && (
+                      <Badge variant="destructive" className="text-xs">All required permissions present</Badge>
+                    )}
+                    {!match.allRequiredPresent && (
+                      <Badge variant="secondary" className="text-xs">
+                        Missing: {match.missingPermissions.join(", ")}
+                      </Badge>
+                    )}
+                  </div>
+                  <p className="text-sm text-muted-foreground mb-2">
+                    {match.path.description.length > 300
+                      ? match.path.description.slice(0, 300) + "..."
+                      : match.path.description}
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {match.path.references.slice(0, 2).map((ref, i) => (
+                      <a
+                        key={i}
+                        href={ref.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs underline inline-flex items-center gap-1"
+                      >
+                        {ref.title} <ExternalLink className="h-3 w-3" />
+                      </a>
+                    ))}
+                    <a
+                      href={`https://pathfinding.cloud/paths/`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs underline inline-flex items-center gap-1"
+                    >
+                      View on pathfinding.cloud <ExternalLink className="h-3 w-3" />
+                    </a>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </AlertDescription>
+        </Alert>
+      )}
 
       <div className="space-y-8">
         {/* Policy Information */}
