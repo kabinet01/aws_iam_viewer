@@ -1,19 +1,20 @@
-import { ProcessedIAMData, RawIAMData, IAMUser, IAMRole, IAMPolicy, IAMGroup } from './types';
+import {
+  ProcessedIAMData,
+  RawIAMData,
+  IAMUser,
+  IAMRole,
+  IAMPolicy,
+  IAMGroup,
+  IAMPolicyStatement,
+  IAMValue,
+} from './types';
 
 export function processAuthDetails(authDetails: RawIAMData): ProcessedIAMData {
-  console.log('processAuthDetails called with:', {
-    UserDetailList: authDetails.UserDetailList?.length || 0,
-    RoleDetailList: authDetails.RoleDetailList?.length || 0,
-    Policies: authDetails.Policies?.length || 0,
-    GroupDetailList: authDetails.GroupDetailList?.length || 0
-  });
-
   const users: Record<string, IAMUser> = {};
   const roles: Record<string, IAMRole> = {};
   const policies: Record<string, IAMPolicy> = {};
   const groups: Record<string, IAMGroup> = {};
 
-  console.log('Processing users...');
   // Process users
   for (const user of authDetails.UserDetailList || []) {
     const userId = user.UserId;
@@ -21,15 +22,17 @@ export function processAuthDetails(authDetails: RawIAMData): ProcessedIAMData {
       UserId: userId,
       UserName: user.UserName,
       Arn: user.Arn,
+      Path: user.Path,
       CreateDate: user.CreateDate,
       AttachedManagedPolicies: user.AttachedManagedPolicies || [],
       GroupList: user.GroupList || [],
       UserPolicyList: user.UserPolicyList || [],
       Tags: user.Tags || [],
+      PermissionsBoundary: user.PermissionsBoundary,
+      PasswordLastUsed: user.PasswordLastUsed,
     };
   }
 
-  console.log('Processing roles...');
   // Process roles
   for (const role of authDetails.RoleDetailList || []) {
     const roleId = role.RoleId;
@@ -37,15 +40,18 @@ export function processAuthDetails(authDetails: RawIAMData): ProcessedIAMData {
       RoleId: roleId,
       RoleName: role.RoleName,
       Arn: role.Arn,
+      Path: role.Path,
       CreateDate: role.CreateDate,
       AssumeRolePolicyDocument: role.AssumeRolePolicyDocument || { Statement: [] },
       AttachedManagedPolicies: role.AttachedManagedPolicies || [],
       RolePolicyList: role.RolePolicyList || [],
       Tags: role.Tags || [],
+      PermissionsBoundary: role.PermissionsBoundary,
+      MaxSessionDuration: role.MaxSessionDuration,
+      RoleLastUsed: role.RoleLastUsed,
     };
   }
 
-  console.log('Processing policies...');
   // Process policies
   for (const policy of authDetails.Policies || []) {
     const policyId = policy.PolicyId;
@@ -53,7 +59,9 @@ export function processAuthDetails(authDetails: RawIAMData): ProcessedIAMData {
       PolicyId: policyId,
       PolicyName: policy.PolicyName,
       Arn: policy.Arn,
+      Path: policy.Path,
       CreateDate: policy.CreateDate,
+      UpdateDate: policy.UpdateDate,
       DefaultVersionId: policy.DefaultVersionId,
       PolicyVersionList: policy.PolicyVersionList || [],
       AttachmentCount: policy.AttachmentCount,
@@ -62,7 +70,6 @@ export function processAuthDetails(authDetails: RawIAMData): ProcessedIAMData {
     };
   }
 
-  console.log('Processing groups...');
   // Process groups
   for (const group of authDetails.GroupDetailList || []) {
     const groupId = group.GroupId;
@@ -70,14 +77,38 @@ export function processAuthDetails(authDetails: RawIAMData): ProcessedIAMData {
       GroupId: groupId,
       GroupName: group.GroupName,
       Arn: group.Arn,
+      Path: group.Path,
       CreateDate: group.CreateDate,
       AttachedManagedPolicies: group.AttachedManagedPolicies || [],
       GroupPolicyList: group.GroupPolicyList || [],
     };
   }
 
-  console.log('processAuthDetails completed successfully');
   return { users, roles, policies, groups };
+}
+
+export function validateAuthDetailsShape(value: unknown): string[] {
+  const errors: string[] = [];
+
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return ['Uploaded JSON must be an object returned by aws iam get-account-authorization-details.'];
+  }
+
+  const record = value as Record<string, unknown>;
+  const listFields = ['UserDetailList', 'RoleDetailList', 'Policies', 'GroupDetailList'];
+  const presentLists = listFields.filter((field) => field in record);
+
+  if (presentLists.length === 0) {
+    errors.push('Expected at least one IAM detail list: UserDetailList, RoleDetailList, Policies, or GroupDetailList.');
+  }
+
+  for (const field of presentLists) {
+    if (!Array.isArray(record[field])) {
+      errors.push(`${field} must be an array.`);
+    }
+  }
+
+  return errors;
 }
 
 export function formatDateTime(value: string): string {
@@ -112,17 +143,17 @@ export function findAssumableRoles(user: IAMUser, roles: Record<string, IAMRole>
 
   for (const role of Object.values(roles)) {
     const assumeRolePolicy = role.AssumeRolePolicyDocument;
-    const statements = assumeRolePolicy?.Statement || [];
+    const statements = normalizeStatements(assumeRolePolicy?.Statement);
 
     for (const statement of statements) {
       if (statement.Effect !== 'Allow') continue;
 
       const principal = statement.Principal;
-      const awsPrincipal = principal?.AWS;
+      const awsPrincipal = typeof principal === 'string' ? principal : principal?.AWS;
 
       if (!awsPrincipal) continue;
 
-      const principalArns = Array.isArray(awsPrincipal) ? awsPrincipal : [awsPrincipal];
+      const principalArns = toArray(awsPrincipal);
 
       for (const principalArn of principalArns) {
         if (user.Arn === principalArn || principalArn === '*') {
@@ -144,17 +175,17 @@ export function findAssumableRolesForRole(role: IAMRole, allRoles: Record<string
     if (targetRole.RoleId === role.RoleId) continue;
     
     const assumeRolePolicy = targetRole.AssumeRolePolicyDocument;
-    const statements = assumeRolePolicy?.Statement || [];
+    const statements = normalizeStatements(assumeRolePolicy?.Statement);
 
     for (const statement of statements) {
       if (statement.Effect !== 'Allow') continue;
 
       const principal = statement.Principal;
-      const awsPrincipal = principal?.AWS;
+      const awsPrincipal = typeof principal === 'string' ? principal : principal?.AWS;
 
       if (!awsPrincipal) continue;
 
-      const principalArns = Array.isArray(awsPrincipal) ? awsPrincipal : [awsPrincipal];
+      const principalArns = toArray(awsPrincipal);
 
       for (const principalArn of principalArns) {
         if (role.Arn === principalArn || principalArn === '*') {
@@ -249,4 +280,16 @@ export function findAttachedEntities(
 
 export function findGroupUsers(groupName: string, users: Record<string, IAMUser>): IAMUser[] {
   return Object.values(users).filter(user => user.GroupList.includes(groupName));
-} 
+}
+
+function normalizeStatements(
+  statement: IAMPolicyStatement | IAMPolicyStatement[] | undefined
+): IAMPolicyStatement[] {
+  if (!statement) return [];
+  return Array.isArray(statement) ? statement : [statement];
+}
+
+function toArray(value: IAMValue | undefined): string[] {
+  if (!value) return [];
+  return Array.isArray(value) ? value : [value];
+}

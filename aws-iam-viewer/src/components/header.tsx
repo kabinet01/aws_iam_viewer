@@ -3,14 +3,16 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { Button } from '@/components/ui/button';
-import { Upload, Home, Database, FileText, Network, Shield } from 'lucide-react';
+import { Upload, Home, Database, FileText, Network, Shield, ShieldAlert, GitCompare } from 'lucide-react';
 import { ThemeToggle } from '@/components/theme-toggle';
 
 const navItems = [
   { href: '/', icon: Home, label: 'Home' },
   { href: '/uploads', icon: FileText, label: 'Uploads' },
   { href: '/dashboard', icon: Database, label: 'Dashboard' },
+  { href: '/findings', icon: ShieldAlert, label: 'Findings' },
   { href: '/graph', icon: Network, label: 'Graph' },
+  { href: '/diff', icon: GitCompare, label: 'Diff' },
 ] as const;
 
 export function Header() {
@@ -23,7 +25,7 @@ export function Header() {
           {/* Logo */}
           <Link href="/" className="flex items-center gap-3 group">
             <div className="flex items-center gap-2">
-              <Shield className="h-5 w-5 text-amber-500" />
+              <Shield className="size-5 text-amber-500" />
               <span className="font-bold text-base tracking-tight">
                 <span className="text-foreground">IAM</span>
                 <span className="text-muted-foreground">_</span>
@@ -49,7 +51,7 @@ export function Header() {
                         : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'
                     }`}
                   >
-                    <Icon className="h-3.5 w-3.5" />
+                    <Icon className="size-3.5" />
                     <span className="hidden sm:inline">{label}</span>
                     {isActive && (
                       <span className="absolute bottom-1 left-2 right-2 h-[2px] bg-amber-500 rounded-full" />
@@ -70,7 +72,7 @@ export function Header() {
                   size="sm"
                   className="flex items-center gap-2 text-xs font-medium border-amber-500/30 text-amber-500 hover:bg-amber-500/10 hover:border-amber-500/50 transition-all"
                 >
-                  <Upload className="h-3.5 w-3.5" />
+                  <Upload className="size-3.5" />
                   <span className="hidden sm:inline">Upload</span>
                 </Button>
               </Link>

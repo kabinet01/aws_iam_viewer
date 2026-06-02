@@ -1,10 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useReducer } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { CopyField } from '@/components/ui/copy-field';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ArrowLeft, UserCheck, FileText, Users } from 'lucide-react';
 import { IAMGroup, ProcessedIAMData, IAMUser, IAMPolicy } from '@/lib/types';
@@ -12,12 +11,57 @@ import { formatDateTime, findGroupUsers } from '@/lib/iam-utils';
 import { JSONViewer } from '@/components/ui/json-viewer';
 import { indexedDBService } from '@/lib/indexeddb';
 import { Breadcrumb } from '@/components/breadcrumb';
+import { ClickableTableRow } from '@/components/clickable-table-row';
+
+export const metadata = {
+  title: "Group Details",
+  description: "Inspect IAM group details, members, and policies.",
+};
+
+type MissingLoadState = "loading" | "missingUpload" | "missingGroup" | "error" | "ready";
+
+type GroupState = {
+  group: IAMGroup | null;
+  data: ProcessedIAMData | null;
+  groupPolicies: IAMPolicy[];
+  groupUsers: IAMUser[];
+  loadState: MissingLoadState;
+};
+
+type GroupAction =
+  | { type: 'set_load_state'; loadState: MissingLoadState }
+  | {
+      type: 'set_loaded';
+      payload: {
+        group: IAMGroup;
+        data: ProcessedIAMData;
+        groupPolicies: IAMPolicy[];
+        groupUsers: IAMUser[];
+      };
+    };
+
+const initialGroupState: GroupState = {
+  group: null,
+  data: null,
+  groupPolicies: [],
+  groupUsers: [],
+  loadState: 'loading',
+};
+
+function groupReducer(state: GroupState, action: GroupAction): GroupState {
+  switch (action.type) {
+    case 'set_load_state':
+      return { ...state, loadState: action.loadState };
+    case 'set_loaded':
+      return { ...state, ...action.payload, loadState: 'ready' };
+    default:
+      return state;
+  }
+}
 
 export default function GroupDetailsPage() {
-  const [group, setGroup] = useState<IAMGroup | null>(null);
-  const [data, setData] = useState<ProcessedIAMData | null>(null);
-  const [groupPolicies, setGroupPolicies] = useState<IAMPolicy[]>([]);
-  const [groupUsers, setGroupUsers] = useState<IAMUser[]>([]);
+  const [{ group, data, groupPolicies, groupUsers, loadState }, dispatch] =
+    useReducer(groupReducer, initialGroupState);
   const router = useRouter();
   const params = useParams();
   const groupId = params.groupId as string;
@@ -27,24 +71,21 @@ export default function GroupDetailsPage() {
       try {
         const currentUploadId = await indexedDBService.getCurrentUploadId();
         if (!currentUploadId) {
-          router.push('/');
+          dispatch({ type: 'set_load_state', loadState: 'missingUpload' });
           return;
         }
 
         const upload = await indexedDBService.getUpload(currentUploadId);
         if (!upload) {
-          router.push('/');
+          dispatch({ type: 'set_load_state', loadState: 'error' });
           return;
         }
 
         const groupData = upload.data.groups[groupId];
         if (!groupData) {
-          router.push('/dashboard');
+          dispatch({ type: 'set_load_state', loadState: 'missingGroup' });
           return;
         }
-
-        setData(upload.data);
-        setGroup(groupData);
 
         // Get policy details for this group
         const policies = groupData.AttachedManagedPolicies.map((attachedPolicy: { PolicyArn: string }) => {
@@ -54,23 +95,61 @@ export default function GroupDetailsPage() {
 
         // Find users that are members of this group
         const users = findGroupUsers(groupData.GroupName, upload.data.users);
-
-        setGroupPolicies(policies);
-        setGroupUsers(users);
+        dispatch({
+          type: 'set_loaded',
+          payload: {
+            group: groupData,
+            data: upload.data,
+            groupPolicies: policies,
+            groupUsers: users,
+          },
+        });
       } catch (error) {
         console.error('Failed to load group data:', error);
-        router.push('/');
+        dispatch({ type: 'set_load_state', loadState: 'error' });
       }
     };
 
     loadGroupData();
   }, [groupId, router]);
 
-  if (!group || !data) {
+  if (loadState !== 'ready' || !group || !data) {
+    if (loadState === 'missingUpload' || loadState === 'error') {
+      return (
+        <div className="max-w-6xl mx-auto space-y-8 overflow-hidden">
+          <Breadcrumb />
+          <div className="rounded-lg border border-dashed p-8 text-sm text-muted-foreground bg-muted/30">
+            Could not load the IAM dataset for this group.
+            <div className="mt-4">
+              <Button variant="outline" onClick={() => router.push('/')}>
+                Go to upload
+              </Button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    if (loadState === 'missingGroup') {
+      return (
+        <div className="max-w-6xl mx-auto space-y-8 overflow-hidden">
+          <Breadcrumb />
+          <div className="rounded-lg border border-dashed p-8 text-sm text-muted-foreground bg-muted/30">
+            This group does not exist in the current dataset.
+            <div className="mt-4">
+              <Button variant="outline" onClick={() => router.push('/dashboard')}>
+                Back to dashboard
+              </Button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="max-w-6xl mx-auto space-y-8 overflow-hidden">
         <Breadcrumb />
-        <div className="flex items-center space-x-4">
+        <div className="flex items-center gap-4">
           <Skeleton className="h-9 w-24" />
           <div className="space-y-2">
             <Skeleton className="h-8 w-64" />
@@ -89,9 +168,9 @@ export default function GroupDetailsPage() {
   return (
     <div className="max-w-6xl mx-auto space-y-8 overflow-hidden">
       <Breadcrumb />
-      <div className="flex items-center space-x-4">
+      <div className="flex items-center gap-4">
         <Button variant="outline" onClick={() => router.back()}>
-          <ArrowLeft className="h-4 w-4 mr-2" />
+          <ArrowLeft className="size-4 mr-2" />
           Back
         </Button>
         <div>
@@ -103,35 +182,27 @@ export default function GroupDetailsPage() {
       <div className="space-y-8">
         {/* Group Information */}
         <section>
-          <h2 className="text-2xl font-semibold mb-4 flex items-center space-x-2">
-            <UserCheck className="h-5 w-5" />
+          <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2">
+            <UserCheck className="size-5" />
             <span>Group Information</span>
           </h2>
           <div className="bg-muted/50 rounded-lg p-6 space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="text-sm font-medium text-muted-foreground">Group Name</label>
-                <CopyField value={group.GroupName}>
-                  <p className="text-sm font-medium">{group.GroupName}</p>
-                </CopyField>
+                <div className="text-sm font-medium text-muted-foreground">Group Name</div>
+                <p className="text-sm font-medium">{group.GroupName}</p>
               </div>
               <div>
-                <label className="text-sm font-medium text-muted-foreground">Group ID</label>
-                <CopyField value={group.GroupId}>
-                  <p className="text-sm">{group.GroupId}</p>
-                </CopyField>
+                <div className="text-sm font-medium text-muted-foreground">Group ID</div>
+                <p className="text-sm">{group.GroupId}</p>
               </div>
               <div className="md:col-span-2">
-                <label className="text-sm font-medium text-muted-foreground">ARN</label>
-                <CopyField value={group.Arn}>
-                  <p className="text-sm font-mono break-all">{group.Arn}</p>
-                </CopyField>
+                <div className="text-sm font-medium text-muted-foreground">ARN</div>
+                <p className="text-sm font-mono break-all">{group.Arn}</p>
               </div>
               <div>
-                <label className="text-sm font-medium text-muted-foreground">Created</label>
-                <CopyField value={formatDateTime(group.CreateDate)}>
-                  <p className="text-sm">{formatDateTime(group.CreateDate)}</p>
-                </CopyField>
+                <div className="text-sm font-medium text-muted-foreground">Created</div>
+                <p className="text-sm">{formatDateTime(group.CreateDate)}</p>
               </div>
             </div>
           </div>
@@ -139,8 +210,8 @@ export default function GroupDetailsPage() {
 
         {/* Group Members */}
         <section>
-          <h2 className="text-2xl font-semibold mb-4 flex items-center space-x-2">
-            <Users className="h-5 w-5" />
+          <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2">
+            <Users className="size-5" />
             <span>Group Members</span>
             <span className="text-sm font-normal text-muted-foreground">
               ({groupUsers.length} user{groupUsers.length !== 1 ? 's' : ''})
@@ -153,32 +224,18 @@ export default function GroupDetailsPage() {
                   <TableRow>
                     <TableHead>User Name</TableHead>
                     <TableHead>ARN</TableHead>
-                    <TableHead>Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {groupUsers.map((user) => (
-                    <TableRow key={user.UserId}>
+                    <ClickableTableRow key={user.UserId} href={`/user/${user.UserId}`}>
                       <TableCell className="font-medium">
-                        <CopyField value={user.UserName}>
-                          {user.UserName}
-                        </CopyField>
+                        {user.UserName}
                       </TableCell>
                       <TableCell>
-                        <CopyField value={user.Arn}>
-                          <span className="font-mono text-sm">{user.Arn}</span>
-                        </CopyField>
+                        <span className="font-mono text-sm">{user.Arn}</span>
                       </TableCell>
-                      <TableCell>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => router.push(`/user/${user.UserId}`)}
-                        >
-                          View User
-                        </Button>
-                      </TableCell>
-                    </TableRow>
+                    </ClickableTableRow>
                   ))}
                 </TableBody>
               </Table>
@@ -192,8 +249,8 @@ export default function GroupDetailsPage() {
 
         {/* Attached Policies */}
         <section>
-          <h2 className="text-2xl font-semibold mb-4 flex items-center space-x-2">
-            <FileText className="h-5 w-5" />
+          <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2">
+            <FileText className="size-5" />
             <span>Attached Policies</span>
             <span className="text-sm font-normal text-muted-foreground">
               ({groupPolicies.length} polic{groupPolicies.length !== 1 ? 'ies' : 'y'})
@@ -206,32 +263,18 @@ export default function GroupDetailsPage() {
                   <TableRow>
                     <TableHead>Policy Name</TableHead>
                     <TableHead>ARN</TableHead>
-                    <TableHead>Actions</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {groupPolicies.map((policy) => (
-                    <TableRow key={policy.PolicyId}>
+                    <ClickableTableRow key={policy.PolicyId} href={`/policy/${policy.PolicyId}`}>
                       <TableCell className="font-medium">
-                        <CopyField value={policy.PolicyName}>
-                          {policy.PolicyName}
-                        </CopyField>
+                        {policy.PolicyName}
                       </TableCell>
                       <TableCell>
-                        <CopyField value={policy.Arn}>
-                          <span className="font-mono text-sm">{policy.Arn}</span>
-                        </CopyField>
+                        <span className="font-mono text-sm">{policy.Arn}</span>
                       </TableCell>
-                      <TableCell>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => router.push(`/policy/${policy.PolicyId}`)}
-                        >
-                          View Policy
-                        </Button>
-                      </TableCell>
-                    </TableRow>
+                    </ClickableTableRow>
                   ))}
                 </TableBody>
               </Table>
@@ -245,8 +288,8 @@ export default function GroupDetailsPage() {
 
         {/* Inline Policies */}
         <section>
-          <h2 className="text-2xl font-semibold mb-4 flex items-center space-x-2">
-            <FileText className="h-5 w-5" />
+          <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2">
+            <FileText className="size-5" />
             <span>Inline Policies</span>
             <span className="text-sm font-normal text-muted-foreground">
               ({group.GroupPolicyList?.length || 0} polic{group.GroupPolicyList?.length !== 1 ? 'ies' : 'y'})
@@ -254,8 +297,8 @@ export default function GroupDetailsPage() {
           </h2>
           {group.GroupPolicyList && group.GroupPolicyList.length > 0 ? (
             <div className="bg-muted/50 rounded-lg p-6 space-y-6">
-              {group.GroupPolicyList.map((policy, index: number) => (
-                <div key={index} className="space-y-2">
+              {group.GroupPolicyList.map((policy) => (
+                <div key={policy.PolicyName} className="space-y-2">
                   <h3 className="text-lg font-medium">{policy.PolicyName}</h3>
                   <JSONViewer data={policy.PolicyDocument} />
                 </div>

@@ -1,16 +1,70 @@
 'use client';
 
-import { useState, useRef, type DragEvent } from 'react';
+import { useReducer, useRef, type ChangeEvent, type DragEvent, type FormEvent, type KeyboardEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Upload, Terminal, Shield, ArrowRight, FileJson } from 'lucide-react';
-import { processAuthDetails } from '@/lib/iam-utils';
+import { processAuthDetails, validateAuthDetailsShape } from '@/lib/iam-utils';
 import { RawIAMData } from '@/lib/types';
 import { indexedDBService } from '@/lib/indexeddb';
 import { toast } from 'sonner';
+
+export const metadata = {
+  title: "Upload IAM Data",
+  description: "Upload and analyze account-authorization-details.json files locally.",
+};
+
+type HomeState = {
+  file: File | null;
+  name: string;
+  isLoading: boolean;
+  error: string;
+  isDragOver: boolean;
+};
+
+type HomeAction =
+  | { type: "select_file"; file: File | null }
+  | { type: "set_name"; name: string }
+  | { type: "set_loading"; isLoading: boolean }
+  | { type: "set_error"; error: string }
+  | { type: "set_drag_over"; isDragOver: boolean };
+
+const initialHomeState: HomeState = {
+  file: null,
+  name: '',
+  isLoading: false,
+  error: '',
+  isDragOver: false,
+};
+
+function homeReducer(state: HomeState, action: HomeAction): HomeState {
+  switch (action.type) {
+    case "select_file":
+      return {
+        ...state,
+        file: action.file,
+        error: action.file ? '' : state.error,
+      };
+    case "set_name":
+      return { ...state, name: action.name };
+    case "set_loading":
+      return { ...state, isLoading: action.isLoading };
+    case "set_error":
+      return { ...state, error: action.error };
+    case "set_drag_over":
+      return { ...state, isDragOver: action.isDragOver };
+    default:
+      return state;
+  }
+}
+
+function handleDragOver(event: DragEvent): void {
+  event.preventDefault();
+  event.stopPropagation();
+}
 
 function generateUUID(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -24,47 +78,73 @@ function generateUUID(): string {
 }
 
 export default function HomePage() {
-  const [file, setFile] = useState<File | null>(null);
-  const [name, setName] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [isDragOver, setIsDragOver] = useState(false);
+  const [state, dispatch] = useReducer(homeReducer, initialHomeState);
+  const { file, name, isLoading, error, isDragOver } = state;
   const fileInputRef = useRef<HTMLInputElement>(null);
   const router = useRouter();
 
   const selectFile = (selectedFile: File) => {
     if (selectedFile.name.endsWith('.json')) {
-      setFile(selectedFile);
-      setError('');
+      dispatch({ type: "select_file", file: selectedFile });
+      dispatch({ type: "set_error", error: '' });
     } else {
-      setError('Please upload a JSON file');
-      setFile(null);
+      dispatch({ type: "set_error", error: 'Please upload a JSON file' });
+      dispatch({ type: "select_file", file: null });
     }
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const selectedFile = e.target.files?.[0];
+  const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const selectedFile = event.target.files?.[0];
     if (selectedFile) selectFile(selectedFile);
   };
 
-  const handleDragEnter = (e: DragEvent) => { e.preventDefault(); e.stopPropagation(); setIsDragOver(true); };
-  const handleDragLeave = (e: DragEvent) => { e.preventDefault(); e.stopPropagation(); setIsDragOver(false); };
-  const handleDragOver = (e: DragEvent) => { e.preventDefault(); e.stopPropagation(); };
-  const handleDrop = (e: DragEvent) => {
-    e.preventDefault(); e.stopPropagation();
-    setIsDragOver(false);
-    const droppedFile = e.dataTransfer.files?.[0];
+  const handleDragEnter = (event: DragEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    dispatch({ type: "set_drag_over", isDragOver: true });
+  };
+
+  const handleDragLeave = (event: DragEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    dispatch({ type: "set_drag_over", isDragOver: false });
+  };
+
+  const handleDrop = (event: DragEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    dispatch({ type: "set_drag_over", isDragOver: false });
+    const droppedFile = event.dataTransfer.files?.[0];
     if (droppedFile) selectFile(droppedFile);
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const openFileDialog = () => fileInputRef.current?.click();
+
+  const handleDropZoneKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      openFileDialog();
+    }
+  };
+
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!file) { setError('Please select a file'); return; }
-    setIsLoading(true);
-    setError('');
+    if (!file) {
+      dispatch({ type: "set_error", error: 'Please select a file' });
+      return;
+    }
+    dispatch({ type: "set_loading", isLoading: true });
+    dispatch({ type: "set_error", error: '' });
     try {
       const text = await file.text();
-      const data: RawIAMData = JSON.parse(text);
+      const parsedData: unknown = JSON.parse(text);
+      const validationErrors = validateAuthDetailsShape(parsedData);
+      if (validationErrors.length > 0) {
+        dispatch({ type: "set_error", error: validationErrors.join(' ') });
+        dispatch({ type: "set_loading", isLoading: false });
+        return;
+      }
+      const data = parsedData as RawIAMData;
       const processedData = processAuthDetails(data);
       const uploadId = generateUUID();
       const uploadData = {
@@ -81,24 +161,23 @@ export default function HomePage() {
       router.push('/dashboard');
     } catch (error: unknown) {
       if (error instanceof SyntaxError) {
-        setError(`JSON parsing error: ${error.message}`);
+        dispatch({ type: "set_error", error: `JSON parsing error: ${error.message}` });
       } else if (error instanceof Error) {
-        setError(`Processing error: ${error.message}`);
+        dispatch({ type: "set_error", error: `Processing error: ${error.message}` });
       } else {
-        setError('Error processing file. Please ensure it\'s a valid account-authorization-details.json file.');
+        dispatch({ type: "set_error", error: 'Error processing file. Please ensure it\'s a valid account-authorization-details.json file.' });
       }
     } finally {
-      setIsLoading(false);
+      dispatch({ type: "set_loading", isLoading: false });
     }
   };
 
   return (
     <div className="max-w-2xl mx-auto space-y-16 py-12">
-      {/* Hero — Brutalist typography with terminal angle */}
       <div className="space-y-8">
         <div className="space-y-3">
           <div className="flex items-center gap-2 text-xs font-mono text-muted-foreground uppercase tracking-[0.2em]">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+            <span className="size-2 rounded-full bg-emerald-500 animate-pulse" />
             <span>AWS Security Analysis Tool</span>
           </div>
           <h1 className="text-5xl font-bold leading-[1.05] tracking-tight">
@@ -110,11 +189,10 @@ export default function HomePage() {
           <p className="text-base text-muted-foreground max-w-lg leading-relaxed">
             Upload an <code className="font-mono text-xs bg-secondary px-1.5 py-0.5 text-amber-500/80">
               account-authorization-details.json
-            </code> file. Everything runs locally in your browser — no data leaves your machine.
+            </code> file. Everything runs locally in your browser, no data leaves your machine.
           </p>
         </div>
 
-        {/* Stats row — decorative */}
         <div className="flex gap-6 text-xs font-mono text-muted-foreground/60">
           <div className="flex items-center gap-2">
             <span className="text-amber-500/60">01</span>
@@ -133,15 +211,13 @@ export default function HomePage() {
         </div>
       </div>
 
-      {/* Upload Card — Sharp edges, border accent */}
       <div className="border border-border bg-card">
-        {/* Card header accent bar */}
         <div className="h-1 bg-gradient-to-r from-amber-500 via-amber-500/50 to-transparent" />
 
         <div className="p-8 space-y-6">
           <div className="flex items-center gap-3">
-            <div className="flex items-center justify-center w-8 h-8 bg-amber-500/10">
-              <FileJson className="h-4 w-4 text-amber-500" />
+            <div className="flex items-center justify-center size-8 bg-amber-500/10">
+              <FileJson className="size-4 text-amber-500" />
             </div>
             <div>
               <h2 className="font-bold text-sm uppercase tracking-wider">Upload IAM Data</h2>
@@ -165,7 +241,7 @@ export default function HomePage() {
                 type="text"
                 placeholder="e.g., Production Account"
                 value={name}
-                onChange={(e) => setName(e.target.value)}
+                onChange={(e) => dispatch({ type: "set_name", name: e.target.value })}
                 className="font-mono text-sm bg-secondary/50 border-border focus:border-amber-500/50 transition-colors"
               />
             </div>
@@ -174,7 +250,8 @@ export default function HomePage() {
               <Label htmlFor="file" className="text-xs font-mono uppercase tracking-wider text-muted-foreground">
                 JSON File
               </Label>
-              <div
+              <button
+                type="button"
                 className={`border-2 border-dashed p-10 text-center cursor-pointer transition-all duration-150 ${
                   isDragOver
                     ? 'border-amber-500 bg-amber-500/5 scale-[1.01]'
@@ -182,24 +259,26 @@ export default function HomePage() {
                       ? 'border-emerald-500/40 bg-emerald-500/5'
                       : 'border-border hover:border-amber-500/30 hover:bg-secondary/30'
                 }`}
-                onClick={() => fileInputRef.current?.click()}
+                onClick={openFileDialog}
                 onDragEnter={handleDragEnter}
                 onDragLeave={handleDragLeave}
                 onDragOver={handleDragOver}
                 onDrop={handleDrop}
+                onKeyDown={handleDropZoneKeyDown}
+                tabIndex={0}
               >
                 <div className={`mb-3 transition-transform duration-150 ${isDragOver ? 'scale-110' : ''}`}>
                   {file ? (
-                    <FileJson className="h-10 w-10 mx-auto text-emerald-500" />
+                    <FileJson className="size-10 mx-auto text-emerald-500" />
                   ) : (
-                    <Upload className={`h-10 w-10 mx-auto ${isDragOver ? 'text-amber-500' : 'text-muted-foreground/40'}`} />
+                    <Upload className={`size-10 mx-auto ${isDragOver ? 'text-amber-500' : 'text-muted-foreground/40'}`} />
                   )}
                 </div>
                 {file ? (
                   <div className="space-y-1">
                     <p className="text-sm font-mono font-medium text-foreground">{file.name}</p>
                     <p className="text-xs font-mono text-muted-foreground">
-                      {(file.size / 1024).toFixed(1)} KB — Click or drop to change
+                      {(file.size / 1024).toFixed(1)} KB, click or drop to change
                     </p>
                   </div>
                 ) : (
@@ -221,7 +300,7 @@ export default function HomePage() {
                   required
                   className="hidden"
                 />
-              </div>
+              </button>
             </div>
 
             <Button
@@ -231,13 +310,13 @@ export default function HomePage() {
             >
               {isLoading ? (
                 <span className="flex items-center gap-2">
-                  <span className="animate-spin h-4 w-4 border-2 border-black/30 border-t-black rounded-full" />
-                  Processing...
+                  <span className="animate-spin size-4 border-2 border-black/30 border-t-black rounded-full" />
+                  Processing…
                 </span>
               ) : (
                 <span className="flex items-center gap-2">
                   Upload and Analyze
-                  <ArrowRight className="h-4 w-4" />
+                  <ArrowRight className="size-4" />
                 </span>
               )}
             </Button>
@@ -245,11 +324,10 @@ export default function HomePage() {
         </div>
       </div>
 
-      {/* Instructions — Minimal, mono */}
       <div className="border border-border bg-card/50">
         <div className="p-8 space-y-4">
           <div className="flex items-center gap-3">
-            <Terminal className="h-4 w-4 text-muted-foreground" />
+            <Terminal className="size-4 text-muted-foreground" />
             <h3 className="font-bold text-sm uppercase tracking-wider">CLI Instructions</h3>
           </div>
           <div className="font-mono text-xs text-muted-foreground space-y-2">
@@ -263,10 +341,10 @@ export default function HomePage() {
           </div>
 
           <Alert className="border-l-2 border-l-amber-500/50 bg-amber-500/5">
-            <Shield className="h-4 w-4 text-amber-500" />
+            <Shield className="size-4 text-amber-500" />
             <AlertDescription className="text-xs">
               <span className="text-amber-500 font-bold">LOCAL ONLY:</span> All processing happens in your browser.
-              No data is sent to external servers. Your AWS credentials and IAM data remain on your machine.
+              No data is sent to external servers, your AWS credentials and IAM data remain on your machine.
             </AlertDescription>
           </Alert>
         </div>

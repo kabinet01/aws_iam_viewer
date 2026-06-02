@@ -18,6 +18,10 @@ A modern Next.js web application that allows you to upload and analyze AWS IAM `
 - **Relationship Mapping**: Explore relationships between IAM entities with interactive graphs
 - **Role Analysis**: See which roles a user can assume and their trust relationships
 - **Policy Inspection**: View detailed policy documents and trust relationships
+- **Security Findings**: Flag administrative access, risky trust policies, wildcard permissions, and known privilege-escalation paths
+- **Effective Permissions**: Summarize direct, group-inherited, and assumable-role permissions for users and roles
+- **Upload Diffing**: Compare two IAM exports to identify resource, policy, trust, and finding changes
+- **Report Export**: Export findings and effective-permission summaries for audit handoffs
 - **Search & Filter**: Search and filter IAM resources for better analysis
 - **Visual Graphs**: Interactive graph visualization of IAM relationships
 
@@ -60,7 +64,7 @@ A modern Next.js web application that allows you to upload and analyze AWS IAM `
 #### Default View
 
 ![All Graph](images/all_graph.png)
-*Viasualize all IAM entities and their relationships*
+*Visualize all IAM entities and their relationships*
 
 #### Filtering Capabilities
 
@@ -155,20 +159,25 @@ A sample data from [iam-vulnerable](https://github.com/BishopFox/iam-vulnerable)
 ### Using the Application
 
 1. **Upload File**: Drag and drop or select your `account-authorization-details.json` file
-2. **Explore Dashboard**: View overview statistics and quick access to resources
+2. **Explore Dashboard**: View overview statistics, security findings, and quick access to resources
 3. **Browse Resources**: Navigate through users, roles, groups, and policies
-4. **Analyze Relationships**: Use the graph view to understand IAM entity relationships
-5. **Search & Filter**: Use the search functionality to find specific resources
-6. **View Details**: Click on any resource to see detailed information
+4. **Review Findings**: Use the findings page to prioritize privilege-escalation, trust, and wildcard-access risks
+5. **Analyze Relationships**: Use the graph view and attack paths to understand IAM entity relationships
+6. **Compare Uploads**: Use the diff page to review changes between two IAM exports
+7. **Search & Filter**: Use the search functionality to find specific resources
+8. **View Details**: Click on any resource to see detailed information and effective permissions
 
 ### Key Features
 
 - **Dashboard**: Overview of your IAM configuration with statistics
+- **Findings**: Local security analysis for privilege escalation, trust policies, administrative access, and broad permissions
 - **User Management**: Detailed user information with attached policies and groups
 - **Role Analysis**: Role details including trust relationships and attached policies
 - **Group Management**: Group membership and attached policies
 - **Policy Inspection**: Full policy document viewing with syntax highlighting
 - **Graph Visualization**: Interactive network graph showing IAM relationships
+- **Upload Diffing**: Compare stored uploads to review changes over time
+- **Exports**: Download findings, effective permissions, and diffs as Markdown, CSV, or JSON
 - **Search**: Quick search across all IAM resources
 
 ## Security

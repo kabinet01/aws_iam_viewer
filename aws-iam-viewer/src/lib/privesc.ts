@@ -1,4 +1,5 @@
 import privescPaths from "@/data/privesc-paths.json";
+import { IAMPolicyDocument } from "@/lib/types";
 
 export interface PrivescPermission {
   permission: string;
@@ -25,18 +26,14 @@ export interface PrivescMatch {
   matchedPermissions: string[];
   missingPermissions: string[];
   allRequiredPresent: boolean;
+  confidence: "confirmed" | "partial";
+  matchedPermissionCount: number;
+  requiredPermissionCount: number;
 }
 
-interface StatementBlock {
-  Effect?: string;
-  Action?: string | string[];
-  NotAction?: string | string[];
-  Resource?: string | string[];
-}
-
-interface PolicyDocument {
-  Version?: string;
-  Statement?: StatementBlock | StatementBlock[];
+export interface AnalyzePrivescOptions {
+  includePartial?: boolean;
+  minMatchedPermissions?: number;
 }
 
 const paths: PrivescPath[] = privescPaths as PrivescPath[];
@@ -75,7 +72,7 @@ function actionMatchesPattern(action: string, pattern: string): boolean {
 }
 
 function extractPermissionsFromPolicy(
-  policyDocument: PolicyDocument | null
+  policyDocument: IAMPolicyDocument | null
 ): string[] {
   if (!policyDocument?.Statement) return [];
 
@@ -88,11 +85,9 @@ function extractPermissionsFromPolicy(
   for (const statement of statements) {
     if (statement.Effect !== "Allow") continue;
 
-    const notActions = statement.NotAction;
-    if (notActions) {
-      // Allow + NotAction = all actions EXCEPT those listed.
-      // This is inherently broad — treat as wildcard to flag all known privesc paths.
-      permissions.add("*");
+    if (statement.NotAction) {
+      // "NotAction" can represent broad allow logic that is difficult to reason about safely
+      // for fixed signature matching. Skip it here and rely on explicit actions.
       continue;
     }
 
@@ -107,8 +102,23 @@ function extractPermissionsFromPolicy(
   return Array.from(permissions);
 }
 
+function getDefaultPolicyDocument(
+  policy: NonNullable<Parameters<typeof analyzeEntityPolicies>[0][number]>
+): IAMPolicyDocument | null {
+  if (!policy.PolicyVersionList || policy.PolicyVersionList.length === 0) return null;
+
+  for (const version of policy.PolicyVersionList) {
+    if (version.VersionId === policy.DefaultVersionId) {
+      return version.Document || null;
+    }
+  }
+
+  return policy.PolicyVersionList[0]?.Document || null;
+}
+
 export function analyzePolicyForPrivesc(
-  policyDocument: PolicyDocument | null
+  policyDocument: IAMPolicyDocument | null,
+  options: AnalyzePrivescOptions = {}
 ): PrivescMatch[] {
   if (!policyDocument) return [];
 
@@ -137,34 +147,56 @@ export function analyzePolicyForPrivesc(
             matchedPermissions: [],
             missingPermissions: [...required],
             allRequiredPresent: false,
+            confidence: "partial",
+            matchedPermissionCount: 0,
+            requiredPermissionCount: required.length,
           };
           matchedPaths.set(path.id, match);
         }
 
         // Check each required permission of this path
         const required = path.permissions.required || [];
+        const matchedPermissions = new Set(match.matchedPermissions);
+        const missingPermissions = new Set(match.missingPermissions);
+
         for (const req of required) {
-          if (!match.matchedPermissions.includes(req.permission)) {
+          if (!matchedPermissions.has(req.permission)) {
             // Check if any of the extracted actions satisfies this requirement
             const satisfied = extractedActions.some((a) =>
               actionMatchesPattern(req.permission, a) ||
               actionMatchesPattern(a, req.permission)
             );
-            if (satisfied && !match.matchedPermissions.includes(req.permission)) {
-              match.matchedPermissions.push(req.permission);
-              match.missingPermissions = match.missingPermissions.filter(
-                (m) => m !== req.permission
-              );
+            if (satisfied) {
+              matchedPermissions.add(req.permission);
+              missingPermissions.delete(req.permission);
             }
           }
         }
 
+        match.matchedPermissions = Array.from(matchedPermissions);
+        match.missingPermissions = Array.from(missingPermissions);
         match.allRequiredPresent = match.missingPermissions.length === 0;
+        match.confidence = match.allRequiredPresent ? "confirmed" : "partial";
+        match.matchedPermissionCount = match.matchedPermissions.length;
+        match.requiredPermissionCount = required.length;
       }
     }
   }
 
-  return Array.from(matchedPaths.values());
+  const includePartial = options.includePartial ?? false;
+  const minMatchedPermissions = options.minMatchedPermissions ?? 1;
+
+  return Array.from(matchedPaths.values())
+    .filter((match) =>
+      match.allRequiredPresent ||
+      (includePartial && match.matchedPermissionCount >= minMatchedPermissions)
+    )
+    .sort((a, b) => {
+      if (a.allRequiredPresent !== b.allRequiredPresent) {
+        return a.allRequiredPresent ? -1 : 1;
+      }
+      return b.matchedPermissionCount - a.matchedPermissionCount || a.path.name.localeCompare(b.path.name);
+    });
 }
 
 export interface EntityPrivescResult {
@@ -180,22 +212,19 @@ export function analyzeEntityPolicies(
     Arn: string;
     PolicyVersionList?: Array<{
       VersionId: string;
-      Document?: PolicyDocument;
+      Document?: IAMPolicyDocument;
     }>;
     DefaultVersionId?: string;
   }>,
   inlinePolicies: Array<{
     PolicyName: string;
-    PolicyDocument?: PolicyDocument;
+    PolicyDocument?: IAMPolicyDocument;
   }>
 ): EntityPrivescResult[] {
   const results: EntityPrivescResult[] = [];
 
   for (const policy of managedPolicies) {
-    const defaultVersion = policy.PolicyVersionList?.find(
-      (v) => v.VersionId === policy.DefaultVersionId
-    );
-    const document = defaultVersion?.Document || null;
+    const document = getDefaultPolicyDocument(policy);
     const matches = analyzePolicyForPrivesc(document);
 
     if (matches.length > 0) {
@@ -229,4 +258,3 @@ export const CATEGORY_LABELS: Record<string, string> = {
   "existing-passrole": "PassRole (Existing Resource)",
   "principal-access": "Principal Access",
 };
-

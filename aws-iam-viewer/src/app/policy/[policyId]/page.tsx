@@ -1,29 +1,87 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { useRouter, useParams } from 'next/navigation';
+import { useEffect, useMemo, useReducer, type ReactElement } from 'react';
+import { useParams, useRouter } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { CopyField } from '@/components/ui/copy-field';
-import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Skeleton } from '@/components/ui/skeleton';
-import { ArrowLeft, FileText, Users, Shield, UserCheck, AlertTriangle, ExternalLink } from 'lucide-react';
-import { IAMPolicy, ProcessedIAMData, IAMUser, IAMRole, IAMGroup } from '@/lib/types';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { AlertTriangle, ExternalLink, Users, Shield, UserCheck } from 'lucide-react';
+import { IAMPolicy, IAMPolicyDocument, IAMRole, IAMUser, IAMGroup, ProcessedIAMData } from '@/lib/types';
+import { analyzePolicyForPrivesc, CATEGORY_LABELS, type PrivescMatch } from '@/lib/privesc';
 import { formatDateTime, findAttachedEntities } from '@/lib/iam-utils';
 import { JSONViewer } from '@/components/ui/json-viewer';
-import { indexedDBService } from '@/lib/indexeddb';
-import { analyzePolicyForPrivesc, PrivescMatch, CATEGORY_LABELS } from '@/lib/privesc';
 import { Breadcrumb } from '@/components/breadcrumb';
+import { indexedDBService } from '@/lib/indexeddb';
+import { getDefaultPolicyDocument } from '@/lib/analysis';
+import { ClickableTableRow } from '@/components/clickable-table-row';
+
+export const metadata = {
+  title: 'Policy Details',
+  description: 'Review IAM policy document, privilege-escalation signals, and attachments.',
+};
+
+type MissingPolicyLoadState = 'loading' | 'missingUpload' | 'missingPolicy' | 'error' | 'ready';
+
+type PolicyState = {
+  policy: IAMPolicy | null;
+  data: ProcessedIAMData | null;
+  policyDocument: IAMPolicyDocument | null;
+  attachedUsers: IAMUser[];
+  attachedRoles: IAMRole[];
+  attachedGroups: IAMGroup[];
+  privescMatches: PrivescMatch[];
+  loadState: MissingPolicyLoadState;
+};
+
+type PolicyAction =
+  | { type: 'set_load_state'; loadState: MissingPolicyLoadState }
+  | {
+      type: 'set_loaded';
+      payload: {
+        policy: IAMPolicy;
+        data: ProcessedIAMData;
+        policyDocument: IAMPolicyDocument | null;
+        attachedUsers: IAMUser[];
+        attachedRoles: IAMRole[];
+        attachedGroups: IAMGroup[];
+        privescMatches: PrivescMatch[];
+      };
+    };
+
+const initialPolicyState: PolicyState = {
+  policy: null,
+  data: null,
+  policyDocument: null,
+  attachedUsers: [],
+  attachedRoles: [],
+  attachedGroups: [],
+  privescMatches: [],
+  loadState: 'loading',
+};
+
+function policyReducer(state: PolicyState, action: PolicyAction): PolicyState {
+  switch (action.type) {
+    case 'set_load_state':
+      return { ...state, loadState: action.loadState };
+    case 'set_loaded':
+      return { ...state, ...action.payload, loadState: 'ready' };
+    default:
+      return state;
+  }
+}
+
+const POLICY_LOADING_MESSAGE: Record<Exclude<MissingPolicyLoadState, 'ready'>, string> = {
+  loading: 'Loading policy data.',
+  missingUpload: 'No upload is available in this browser session. Upload a file first.',
+  missingPolicy: 'The requested policy could not be found in the current upload.',
+  error: 'There was an issue loading this policy.',
+};
 
 export default function PolicyDetailsPage() {
-  const [policy, setPolicy] = useState<IAMPolicy | null>(null);
-  const [data, setData] = useState<ProcessedIAMData | null>(null);
-  const [policyDocument, setPolicyDocument] = useState<Record<string, unknown> | null>(null);
-  const [attachedUsers, setAttachedUsers] = useState<IAMUser[]>([]);
-  const [attachedRoles, setAttachedRoles] = useState<IAMRole[]>([]);
-  const [attachedGroups, setAttachedGroups] = useState<IAMGroup[]>([]);
-  const [privescMatches, setPrivescMatches] = useState<PrivescMatch[]>([]);
+  const [{ policy, data, policyDocument, attachedUsers, attachedRoles, attachedGroups, privescMatches, loadState }, dispatch] =
+    useReducer(policyReducer, initialPolicyState);
   const router = useRouter();
   const params = useParams();
   const policyId = params.policyId as string;
@@ -33,56 +91,79 @@ export default function PolicyDetailsPage() {
       try {
         const currentUploadId = await indexedDBService.getCurrentUploadId();
         if (!currentUploadId) {
-          router.push('/');
+          dispatch({ type: 'set_load_state', loadState: 'missingUpload' });
           return;
         }
 
         const upload = await indexedDBService.getUpload(currentUploadId);
         if (!upload) {
-          router.push('/');
+          dispatch({ type: 'set_load_state', loadState: 'missingUpload' });
           return;
         }
 
         const policyData = upload.data.policies[policyId];
         if (!policyData) {
-          router.push('/dashboard');
+          dispatch({ type: 'set_load_state', loadState: 'missingPolicy' });
           return;
         }
 
-        setData(upload.data);
-        setPolicy(policyData);
+        const document = getDefaultPolicyDocument(policyData);
+        const rawMatches = document != null ? analyzePolicyForPrivesc(document, { includePartial: true, minMatchedPermissions: 2 }) : [];
+        const privescMatches = rawMatches.filter(
+          (match) => match.allRequiredPresent || match.matchedPermissionCount >= 2
+        );
 
-        // Find the default policy version document
-        const document = policyData.PolicyVersionList?.find((version: { VersionId: string; Document: Record<string, unknown> }) => 
-          version.VersionId === policyData.DefaultVersionId
-        )?.Document || null;
-        setPolicyDocument(document);
-
-        // Analyze for privilege escalation
-        if (document) {
-          const matches = analyzePolicyForPrivesc(document);
-          setPrivescMatches(matches);
-        }
-
-        // Find attached entities
         const { users, roles, groups } = findAttachedEntities(policyData.Arn, upload.data);
-        setAttachedUsers(users);
-        setAttachedRoles(roles);
-        setAttachedGroups(groups);
+
+        dispatch({
+          type: 'set_loaded',
+          payload: {
+            policy: policyData,
+            data: upload.data,
+            policyDocument: document,
+            attachedUsers: users,
+            attachedRoles: roles,
+            attachedGroups: groups,
+            privescMatches,
+          },
+        });
       } catch (error) {
         console.error('Failed to load policy data:', error);
-        router.push('/');
+        dispatch({ type: 'set_load_state', loadState: 'error' });
       }
     };
 
     loadPolicyData();
-  }, [policyId, router]);
+  }, [policyId]);
 
-  if (!policy || !data) {
+  if (!data || !policy || loadState !== 'ready') {
+    if (loadState !== 'loading' && loadState !== 'ready') {
+      return (
+        <div className="max-w-6xl mx-auto space-y-8 overflow-hidden">
+          <Breadcrumb />
+          <div className="space-y-2">
+            <h1 className="text-2xl font-bold">Policy Details</h1>
+            <p className="text-muted-foreground">{POLICY_LOADING_MESSAGE[loadState]}</p>
+          </div>
+          <div className="flex gap-2">
+            {loadState === 'missingUpload' ? (
+              <Button variant="outline" onClick={() => router.push('/')}>
+                Upload IAM Data
+              </Button>
+            ) : (
+              <Button variant="outline" onClick={() => router.push('/dashboard')}>
+                Back to Dashboard
+              </Button>
+            )}
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="max-w-6xl mx-auto space-y-8 overflow-hidden">
         <Breadcrumb />
-        <div className="flex items-center space-x-4">
+        <div className="flex items-center gap-4">
           <Skeleton className="h-9 w-24" />
           <div className="space-y-2">
             <Skeleton className="h-8 w-64" />
@@ -99,11 +180,42 @@ export default function PolicyDetailsPage() {
   }
 
   return (
+    <PolicyDetailsContent
+      policy={policy}
+      policyDocument={policyDocument}
+      privescMatches={privescMatches}
+      attachedUsers={attachedUsers}
+      attachedRoles={attachedRoles}
+      attachedGroups={attachedGroups}
+      onBack={() => router.back()}
+    />
+  );
+}
+
+type PolicyDetailsContentProps = {
+  policy: IAMPolicy;
+  policyDocument: IAMPolicyDocument | null;
+  privescMatches: PrivescMatch[];
+  attachedUsers: IAMUser[];
+  attachedRoles: IAMRole[];
+  attachedGroups: IAMGroup[];
+  onBack: () => void;
+};
+
+function PolicyDetailsContent({
+  policy,
+  policyDocument,
+  privescMatches,
+  attachedUsers,
+  attachedRoles,
+  attachedGroups,
+  onBack,
+}: PolicyDetailsContentProps) {
+  return (
     <div className="max-w-6xl mx-auto space-y-8 overflow-hidden">
       <Breadcrumb />
-      <div className="flex items-center space-x-4">
-        <Button variant="outline" onClick={() => router.back()}>
-          <ArrowLeft className="h-4 w-4 mr-2" />
+      <div className="flex items-center gap-4">
+        <Button variant="outline" onClick={onBack}>
           Back
         </Button>
         <div>
@@ -112,308 +224,338 @@ export default function PolicyDetailsPage() {
         </div>
       </div>
 
-      {/* Privilege Escalation Warning */}
-      {privescMatches.length > 0 && (
-        <Alert variant="destructive">
-          <AlertTriangle className="h-5 w-5" />
-          <AlertTitle className="text-lg font-bold">
-            Privilege Escalation Risk Detected
-          </AlertTitle>
-          <AlertDescription>
-            <p className="mt-2 mb-3">
-              This policy grants permissions that match {privescMatches.length} known privilege escalation
-              {privescMatches.length > 1 ? ' paths' : ' path'} from{" "}
-              <a
-                href="https://pathfinding.cloud/paths/"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="underline inline-flex items-center gap-1"
-              >
-                pathfinding.cloud <ExternalLink className="h-3 w-3" />
-              </a>:
-            </p>
-            <div className="space-y-4 mt-3">
-              {privescMatches.map((match) => (
-                <div key={match.path.id} className="border-l-2 border-destructive/50 pl-4">
-                  <div className="flex items-center gap-2 mb-1">
-                    <Badge variant="destructive" className="text-xs">
-                      {CATEGORY_LABELS[match.path.category] || match.path.category}
-                    </Badge>
-                    <span className="font-semibold">{match.path.name}</span>
-                    {match.allRequiredPresent && (
-                      <Badge variant="destructive" className="text-xs">All required permissions present</Badge>
-                    )}
-                    {!match.allRequiredPresent && (
-                      <Badge variant="secondary" className="text-xs">
-                        Missing: {match.missingPermissions.join(", ")}
-                      </Badge>
-                    )}
-                  </div>
-                  <p className="text-sm text-muted-foreground mb-2">
-                    {match.path.description.length > 300
-                      ? match.path.description.slice(0, 300) + "..."
-                      : match.path.description}
-                  </p>
-                  <div className="flex flex-wrap gap-2">
-                    {match.path.references.slice(0, 2).map((ref, i) => (
-                      <a
-                        key={i}
-                        href={ref.url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-xs underline inline-flex items-center gap-1"
-                      >
-                        {ref.title} <ExternalLink className="h-3 w-3" />
-                      </a>
-                    ))}
-                    <a
-                      href={`https://pathfinding.cloud/paths/`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-xs underline inline-flex items-center gap-1"
-                    >
-                      View on pathfinding.cloud <ExternalLink className="h-3 w-3" />
-                    </a>
-                  </div>
-                </div>
+      <PrivilegeEscalationSummary matches={privescMatches} />
+
+      <section>
+        <h2 className="text-2xl font-semibold mb-4">Policy Information</h2>
+        <div className="bg-muted/50 rounded-lg p-6 space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <div className="text-sm font-medium text-muted-foreground">Policy Name</div>
+              <p className="text-sm font-medium">{policy.PolicyName}</p>
+            </div>
+            <div>
+              <div className="text-sm font-medium text-muted-foreground">Policy ID</div>
+              <p className="text-sm">{policy.PolicyId}</p>
+            </div>
+            <div className="md:col-span-2">
+              <div className="text-sm font-medium text-muted-foreground">ARN</div>
+              <p className="text-sm font-mono break-all">{policy.Arn}</p>
+            </div>
+            <div>
+              <div className="text-sm font-medium text-muted-foreground">Created</div>
+              <p className="text-sm">{formatDateTime(policy.CreateDate)}</p>
+            </div>
+            <div>
+              <div className="text-sm font-medium text-muted-foreground">Attachment Count</div>
+              <Badge variant="secondary">{policy.AttachmentCount}</Badge>
+            </div>
+            <div>
+              <div className="text-sm font-medium text-muted-foreground">Attachable</div>
+              <Badge variant={policy.IsAttachable ? 'default' : 'destructive'}>
+                {policy.IsAttachable ? 'Yes' : 'No'}
+              </Badge>
+            </div>
+          </div>
+          {policy.Description && (
+            <div>
+              <div className="text-sm font-medium text-muted-foreground">Description</div>
+              <p className="text-sm">{policy.Description}</p>
+            </div>
+          )}
+        </div>
+      </section>
+
+      <section>
+        <h2 className="text-2xl font-semibold mb-4">Policy Document</h2>
+        <div className="bg-muted/50 rounded-lg p-6">
+          {policyDocument ? (
+            <JSONViewer data={policyDocument} />
+          ) : (
+            <p className="text-muted-foreground">Policy document not available.</p>
+          )}
+        </div>
+      </section>
+
+      <AttachedEntitiesSection
+        title="Attached to Users"
+        icon={<Users className="size-5" />}
+        entities={attachedUsers.map((entity) => ({
+          id: entity.UserId,
+          href: `/user/${entity.UserId}`,
+          name: entity.UserName,
+          arn: entity.Arn,
+        }))}
+      />
+
+      <AttachedEntitiesSection
+        title="Attached to Roles"
+        icon={<Shield className="size-5" />}
+        entities={attachedRoles.map((entity) => ({
+          id: entity.RoleId,
+          href: `/role/${entity.RoleId}`,
+          name: entity.RoleName,
+          arn: entity.Arn,
+        }))}
+      />
+
+      <AttachedEntitiesSection
+        title="Attached to Groups"
+        icon={<UserCheck className="size-5" />}
+        entities={attachedGroups.map((entity) => ({
+          id: entity.GroupId,
+          href: `/group/${entity.GroupId}`,
+          name: entity.GroupName,
+          arn: entity.Arn,
+        }))}
+      />
+    </div>
+  );
+}
+
+type AttachedEntityRow = {
+  id: string;
+  href: string;
+  name: string;
+  arn: string;
+};
+
+type AttachedEntitiesSectionProps = {
+  title: string;
+  icon: ReactElement;
+  entities: AttachedEntityRow[];
+};
+
+function AttachedEntitiesSection({
+  title,
+  icon,
+  entities,
+}: AttachedEntitiesSectionProps) {
+  const rows = useMemo(() => entities, [entities]);
+
+  return (
+    <section>
+      <h2 className="text-2xl font-semibold mb-4 flex items-center gap-2">
+        {icon}
+        <span>{title}</span>
+        <span className="text-sm font-normal text-muted-foreground">({entities.length} item{entities.length === 1 ? '' : 's'})</span>
+      </h2>
+      {rows.length > 0 ? (
+        <div className="bg-muted/50 rounded-lg p-6">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Name</TableHead>
+                <TableHead>ARN</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {rows.map((row) => (
+                <ClickableTableRow key={row.id} href={row.href}>
+                  <TableCell className="font-medium">{row.name}</TableCell>
+                  <TableCell>
+                    <span className="font-mono text-sm">{row.arn}</span>
+                  </TableCell>
+                </ClickableTableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      ) : (
+        <div className="bg-muted/50 rounded-lg p-6">
+          <p className="text-muted-foreground">Not attached to any entities</p>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PrivilegeEscalationSummary({ matches }: { matches: PrivescMatch[] }) {
+  const confirmedMatches = useMemo(() => matches.filter((match) => match.allRequiredPresent), [matches]);
+  const partialMatches = useMemo(() => matches.filter((match) => !match.allRequiredPresent), [matches]);
+  const categories = useMemo(() => {
+    const counts = new Map<string, number>();
+    confirmedMatches.forEach((match) => {
+      const label = CATEGORY_LABELS[match.path.category] || match.path.category;
+      counts.set(label, (counts.get(label) || 0) + 1);
+    });
+    return Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
+  }, [confirmedMatches]);
+
+  if (matches.length === 0) return null;
+
+  const hasConfirmed = confirmedMatches.length > 0;
+
+  return (
+    <Alert variant={hasConfirmed ? 'destructive' : 'default'}>
+      <AlertTriangle className="size-5" />
+      <AlertTitle className="text-lg font-bold">
+        {hasConfirmed ? 'Confirmed Privilege Escalation Paths' : 'Potential Privilege Escalation Ingredients'}
+      </AlertTitle>
+      <AlertDescription>
+        <div className="mt-3 space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <RiskMetric
+              label="Confirmed paths"
+              value={confirmedMatches.length}
+              tone={hasConfirmed ? 'destructive' : 'secondary'}
+            />
+            <RiskMetric label="Partial indicators" value={partialMatches.length} tone="secondary" />
+            <RiskMetric label="Categories" value={categories.length} tone="secondary" />
+          </div>
+
+          <p className="text-sm text-muted-foreground">
+            Confirmed paths include every required permission. Partial indicators are grouped below so
+            complete risks stay easy to scan first.
+          </p>
+
+          {categories.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {categories.map(([category, count]) => (
+                <Badge key={category} variant="secondary">
+                  {category}: {count}
+                </Badge>
               ))}
             </div>
-          </AlertDescription>
-        </Alert>
-      )}
-
-      <div className="space-y-8">
-        {/* Policy Information */}
-        <section>
-          <h2 className="text-2xl font-semibold mb-4 flex items-center space-x-2">
-            <FileText className="h-5 w-5" />
-            <span>Policy Information</span>
-          </h2>
-          <div className="bg-muted/50 rounded-lg p-6 space-y-4">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <label className="text-sm font-medium text-muted-foreground">Policy Name</label>
-                <CopyField value={policy.PolicyName}>
-                  <p className="text-sm font-medium">{policy.PolicyName}</p>
-                </CopyField>
-              </div>
-              <div>
-                <label className="text-sm font-medium text-muted-foreground">Policy ID</label>
-                <CopyField value={policy.PolicyId}>
-                  <p className="text-sm">{policy.PolicyId}</p>
-                </CopyField>
-              </div>
-              <div className="md:col-span-2">
-                <label className="text-sm font-medium text-muted-foreground">ARN</label>
-                <CopyField value={policy.Arn}>
-                  <p className="text-sm font-mono break-all">{policy.Arn}</p>
-                </CopyField>
-              </div>
-              <div>
-                <label className="text-sm font-medium text-muted-foreground">Created</label>
-                <CopyField value={formatDateTime(policy.CreateDate)}>
-                  <p className="text-sm">{formatDateTime(policy.CreateDate)}</p>
-                </CopyField>
-              </div>
-              <div>
-                <label className="text-sm font-medium text-muted-foreground">Attachment Count</label>
-                <Badge variant="secondary">{policy.AttachmentCount}</Badge>
-              </div>
-              <div>
-                <label className="text-sm font-medium text-muted-foreground">Attachable</label>
-                <div className="mt-1">
-                  <Badge variant={policy.IsAttachable ? "default" : "destructive"}>
-                    {policy.IsAttachable ? "Yes" : "No"}
-                  </Badge>
-                </div>
-              </div>
-            </div>
-            {policy.Description && (
-              <div>
-                <label className="text-sm font-medium text-muted-foreground">Description</label>
-                <p className="text-sm">{policy.Description}</p>
-              </div>
-            )}
-          </div>
-        </section>
-
-        {/* Policy Document */}
-        <section>
-          <h2 className="text-2xl font-semibold mb-4 flex items-center space-x-2">
-            <FileText className="h-5 w-5" />
-            <span>Policy Document</span>
-            <span className="text-sm font-normal text-muted-foreground">
-              (Default version {policy.DefaultVersionId})
-            </span>
-          </h2>
-          <div className="bg-muted/50 rounded-lg p-6">
-            {policyDocument ? (
-              <JSONViewer data={policyDocument} />
-            ) : (
-              <p className="text-muted-foreground">Policy document not available</p>
-            )}
-          </div>
-        </section>
-
-        {/* Attached to Users */}
-        <section>
-          <h2 className="text-2xl font-semibold mb-4 flex items-center space-x-2">
-            <Users className="h-5 w-5" />
-            <span>Attached to Users</span>
-            <span className="text-sm font-normal text-muted-foreground">
-              ({attachedUsers.length} user{attachedUsers.length !== 1 ? 's' : ''})
-            </span>
-          </h2>
-          {attachedUsers.length > 0 ? (
-            <div className="bg-muted/50 rounded-lg p-6">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>User Name</TableHead>
-                    <TableHead>ARN</TableHead>
-                    <TableHead>Actions</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {attachedUsers.map((user) => (
-                    <TableRow key={user.UserId}>
-                      <TableCell className="font-medium">
-                        <CopyField value={user.UserName}>
-                          {user.UserName}
-                        </CopyField>
-                      </TableCell>
-                      <TableCell>
-                        <CopyField value={user.Arn}>
-                          <span className="font-mono text-sm">{user.Arn}</span>
-                        </CopyField>
-                      </TableCell>
-                      <TableCell>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => router.push(`/user/${user.UserId}`)}
-                        >
-                          View User
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          ) : (
-            <div className="bg-muted/50 rounded-lg p-6">
-              <p className="text-muted-foreground">Not attached to any users</p>
-            </div>
           )}
-        </section>
 
-        {/* Attached to Roles */}
-        <section>
-          <h2 className="text-2xl font-semibold mb-4 flex items-center space-x-2">
-            <Shield className="h-5 w-5" />
-            <span>Attached to Roles</span>
-            <span className="text-sm font-normal text-muted-foreground">
-              ({attachedRoles.length} role{attachedRoles.length !== 1 ? 's' : ''})
-            </span>
-          </h2>
-          {attachedRoles.length > 0 ? (
-            <div className="bg-muted/50 rounded-lg p-6">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Role Name</TableHead>
-                    <TableHead>ARN</TableHead>
-                    <TableHead>Actions</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {attachedRoles.map((role) => (
-                    <TableRow key={role.RoleId}>
-                      <TableCell className="font-medium">
-                        <CopyField value={role.RoleName}>
-                          {role.RoleName}
-                        </CopyField>
-                      </TableCell>
-                      <TableCell>
-                        <CopyField value={role.Arn}>
-                          <span className="font-mono text-sm">{role.Arn}</span>
-                        </CopyField>
-                      </TableCell>
-                      <TableCell>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => router.push(`/role/${role.RoleId}`)}
-                        >
-                          View Role
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          ) : (
-            <div className="bg-muted/50 rounded-lg p-6">
-              <p className="text-muted-foreground">Not attached to any roles</p>
-            </div>
+          {confirmedMatches.length > 0 && (
+            <details className="space-y-2">
+              <summary className="cursor-pointer text-sm font-semibold">
+                Show confirmed paths ({confirmedMatches.length})
+              </summary>
+              <div className="mt-3 space-y-2">
+                {confirmedMatches.slice(0, 8).map((match) => (
+                  <PrivescMatchRow key={match.path.id} match={match} expanded />
+                ))}
+                {confirmedMatches.length > 8 && (
+                  <p className="text-xs text-muted-foreground">Showing 8 of {confirmedMatches.length} confirmed paths.</p>
+                )}
+              </div>
+            </details>
           )}
-        </section>
 
-        {/* Attached to Groups */}
-        <section>
-          <h2 className="text-2xl font-semibold mb-4 flex items-center space-x-2">
-            <UserCheck className="h-5 w-5" />
-            <span>Attached to Groups</span>
-            <span className="text-sm font-normal text-muted-foreground">
-              ({attachedGroups.length} group{attachedGroups.length !== 1 ? 's' : ''})
-            </span>
-          </h2>
-          {attachedGroups.length > 0 ? (
-            <div className="bg-muted/50 rounded-lg p-6">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Group Name</TableHead>
-                    <TableHead>ARN</TableHead>
-                    <TableHead>Actions</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {attachedGroups.map((group) => (
-                    <TableRow key={group.GroupId}>
-                      <TableCell className="font-medium">
-                        <CopyField value={group.GroupName}>
-                          {group.GroupName}
-                        </CopyField>
-                      </TableCell>
-                      <TableCell>
-                        <CopyField value={group.Arn}>
-                          <span className="font-mono text-sm">{group.Arn}</span>
-                        </CopyField>
-                      </TableCell>
-                      <TableCell>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => router.push(`/group/${group.GroupId}`)}
-                        >
-                          View Group
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          ) : (
-            <div className="bg-muted/50 rounded-lg p-6">
-              <p className="text-muted-foreground">Not attached to any groups</p>
-            </div>
+          {partialMatches.length > 0 && (
+            <details className="border border-border bg-background/60 p-3">
+              <summary className="cursor-pointer text-sm font-semibold">
+                {partialMatches.length} partial ingredient{partialMatches.length !== 1 ? 's' : ''} (missing one or more permissions)
+              </summary>
+              <div className="mt-3 space-y-2">
+                {partialMatches.slice(0, 10).map((match) => (
+                  <PrivescMatchRow key={match.path.id} match={match} />
+                ))}
+                {partialMatches.length > 10 && (
+                  <p className="text-xs text-muted-foreground">Showing 10 of {partialMatches.length} partial ingredients.</p>
+                )}
+              </div>
+            </details>
           )}
-        </section>
+
+          {!hasConfirmed && (
+            <p className="text-xs text-muted-foreground">
+              No complete escalation chain is currently confirmed. Partial items are risk-building signals only.
+            </p>
+          )}
+        </div>
+      </AlertDescription>
+    </Alert>
+  );
+}
+
+function RiskMetric({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone: 'destructive' | 'secondary';
+}) {
+  return (
+    <div className="border border-border bg-background/60 p-3">
+      <div className="text-xs uppercase tracking-wider text-muted-foreground">{label}</div>
+      <div className="mt-1 flex items-center gap-2">
+        <span className="text-2xl font-bold">{value}</span>
+        <Badge variant={tone}>{tone === 'destructive' ? 'Actionable' : 'Context'}</Badge>
       </div>
     </div>
   );
-} 
+}
+
+function PrivescMatchRow({ match, expanded = false }: { match: PrivescMatch; expanded?: boolean }) {
+  const category = CATEGORY_LABELS[match.path.category] || match.path.category;
+
+  return (
+    <div className="border border-border bg-background/60 p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge variant={match.allRequiredPresent ? 'destructive' : 'secondary'}>{category}</Badge>
+        <span className="font-semibold text-sm">{match.path.name}</span>
+        <Badge variant="secondary" className="text-xs">
+          {match.allRequiredPresent ? 'confirmed' : 'partial'}
+        </Badge>
+      </div>
+      <p className="mt-1 text-xs text-muted-foreground">
+        {match.matchedPermissionCount}/{match.requiredPermissionCount} required permissions matched
+      </p>
+      <div className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
+        <div>
+          <span className="font-semibold">Matched:</span>{' '}
+          <span className="font-mono text-muted-foreground">{formatPermissionList(match.matchedPermissions)}</span>
+        </div>
+        {!match.allRequiredPresent && (
+          <div>
+            <span className="font-semibold">Missing:</span>{' '}
+            <span className="font-mono text-muted-foreground">{formatPermissionList(match.missingPermissions)}</span>
+          </div>
+        )}
+      </div>
+
+      {(expanded || match.allRequiredPresent) && match.path.description && (
+        <details className="mt-2">
+          <summary className="text-xs font-semibold cursor-pointer text-muted-foreground">Description and references</summary>
+          <p className="mt-2 text-xs text-muted-foreground">{summarizeText(match.path.description, 220)}</p>
+          {match.path.references.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-2">
+              {match.path.references.slice(0, 2).map((reference) => (
+                <a
+                  key={reference.url}
+                  href={reference.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs underline inline-flex items-center gap-1"
+                >
+                  {reference.title} <ExternalLink className="size-3" />
+                </a>
+              ))}
+            </div>
+          )}
+        </details>
+      )}
+
+      {!expanded && !match.allRequiredPresent && match.path.references.length > 0 && (
+        <div className="mt-2">
+          <a
+            href={match.path.references[0].url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-xs underline inline-flex items-center gap-1"
+          >
+            View AWS reference <ExternalLink className="size-3" />
+          </a>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function summarizeText(value: string, maxLength: number): string {
+  if (maxLength <= 0) return '';
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength).trim()}…`;
+}
+
+function formatPermissionList(values: string[]): string {
+  if (values.length === 0) return 'none';
+  if (values.length <= 4) return values.join(', ');
+  return `${values.slice(0, 4).join(', ')} +${values.length - 4} more`;
+}

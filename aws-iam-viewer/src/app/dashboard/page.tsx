@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useMemo, useReducer, type ReactNode } from 'react';
 import { useRouter } from 'next/navigation';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -8,223 +8,345 @@ import { Input } from '@/components/ui/input';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
-import { CopyField } from '@/components/ui/copy-field';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Breadcrumb } from '@/components/breadcrumb';
-import { Search, Users, Shield, FileText, UserCheck } from 'lucide-react';
-import { ProcessedIAMData, IAMRole, IAMPolicy } from '@/lib/types';
+import { ClickableTableRow } from '@/components/clickable-table-row';
+import { Search, Users, Shield, FileText, UserCheck, ShieldAlert, GitCompare } from 'lucide-react';
+import { IAMPolicy, IAMRole, IAMGroup, ProcessedIAMData } from '@/lib/types';
 import { formatDateTime, truncateArn } from '@/lib/iam-utils';
 import { indexedDBService } from '@/lib/indexeddb';
 import { analyzePolicyForPrivesc } from '@/lib/privesc';
+import { analyzeSecurityFindings, getDefaultPolicyDocument } from '@/lib/analysis';
+
+export const metadata = {
+  title: 'IAM Dashboard',
+  description: 'Summary view of users, roles, policies, and findings from the selected IAM upload.',
+};
+
+type MissingUploadState = 'loading' | 'missing' | 'notFound' | 'ready';
+
+type DashboardState = {
+  data: ProcessedIAMData | null;
+  currentUpload: { name: string; data: ProcessedIAMData } | null;
+  searchTerm: string;
+  activeTab: 'users' | 'roles' | 'policies' | 'groups';
+  loadState: MissingUploadState;
+};
+
+type DashboardAction =
+  | { type: 'set_data'; data: ProcessedIAMData | null }
+  | { type: 'set_current_upload'; currentUpload: { name: string; data: ProcessedIAMData } | null }
+  | { type: 'set_search_term'; searchTerm: string }
+  | { type: 'set_active_tab'; activeTab: DashboardState['activeTab'] }
+  | { type: 'set_load_state'; loadState: MissingUploadState };
+
+const initialDashboardState: DashboardState = {
+  data: null,
+  currentUpload: null,
+  searchTerm: '',
+  activeTab: 'users',
+  loadState: 'loading',
+};
+
+const AWS_MANAGED_POLICY_PREFIX = 'arn:aws:iam::aws:policy/';
+
+function dashboardReducer(state: DashboardState, action: DashboardAction): DashboardState {
+  switch (action.type) {
+    case 'set_data':
+      return { ...state, data: action.data };
+    case 'set_current_upload':
+      return { ...state, currentUpload: action.currentUpload };
+    case 'set_search_term':
+      return { ...state, searchTerm: action.searchTerm };
+    case 'set_active_tab':
+      return { ...state, activeTab: action.activeTab };
+    case 'set_load_state':
+      return { ...state, loadState: action.loadState };
+    default:
+      return state;
+  }
+}
+
+function categorizeRoles(roles: Record<string, IAMRole>) {
+  const userRoles: [string, IAMRole][] = [];
+  const serviceRoles: [string, IAMRole][] = [];
+
+  Object.entries(roles).forEach(([roleId, role]) => {
+    if (role.Arn.includes('/aws-service-role/')) {
+      serviceRoles.push([roleId, role]);
+    } else {
+      userRoles.push([roleId, role]);
+    }
+  });
+
+  return { userRoles, serviceRoles };
+}
+
+function categorizePolicies(policies: Record<string, IAMPolicy>) {
+  const userPolicies: [string, IAMPolicy][] = [];
+  const serviceRolePolicies: [string, IAMPolicy][] = [];
+  const managedPolicies: [string, IAMPolicy][] = [];
+
+  Object.entries(policies).forEach(([policyId, policy]) => {
+    if (policy.Arn.includes('::aws:policy/aws-service-role/') || policy.Arn.includes(':policy/service-role/')) {
+      serviceRolePolicies.push([policyId, policy]);
+    } else if (
+      policy.Arn.startsWith(AWS_MANAGED_POLICY_PREFIX) &&
+      !policy.Arn.includes('/aws-service-role/') &&
+      !policy.Arn.includes('/service-role/')
+    ) {
+      managedPolicies.push([policyId, policy]);
+    } else {
+      userPolicies.push([policyId, policy]);
+    }
+  });
+
+  return { userPolicies, serviceRolePolicies, managedPolicies };
+}
 
 export default function DashboardPage() {
-  const [data, setData] = useState<ProcessedIAMData | null>(null);
-  const [currentUpload, setCurrentUpload] = useState<{ name: string; data: ProcessedIAMData } | null>(null);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [activeTab, setActiveTab] = useState('users');
+  const [state, dispatch] = useReducer(dashboardReducer, initialDashboardState);
+  const { data, currentUpload, searchTerm, activeTab, loadState } = state;
   const router = useRouter();
 
-  // Precompute privesc risk for all non-AWS policies
   const policyRiskMap = useMemo(() => {
     const riskMap: Record<string, number> = {};
     if (!data) return riskMap;
+
     for (const policy of Object.values(data.policies)) {
-      // Skip AWS managed policies
-      if (policy.Arn.includes("::aws:policy/")) continue;
-      const defaultVersion = policy.PolicyVersionList?.find(
-        (v) => v.VersionId === policy.DefaultVersionId
-      );
-      if (defaultVersion?.Document) {
-        const matches = analyzePolicyForPrivesc(defaultVersion.Document);
-        if (matches.length > 0) {
-          riskMap[policy.Arn] = matches.length;
-        }
-      }
+      if (policy.Arn.startsWith(AWS_MANAGED_POLICY_PREFIX)) continue;
+      const document = getDefaultPolicyDocument(policy);
+      if (!document) continue;
+      const matches = analyzePolicyForPrivesc(document);
+      if (matches.length > 0) riskMap[policy.Arn] = matches.length;
     }
+
     return riskMap;
   }, [data]);
+
+  const findings = useMemo(() => (data ? analyzeSecurityFindings(data) : []), [data]);
+  const highSeverityFindings = useMemo(
+    () => findings.filter((finding) => finding.severity === 'critical' || finding.severity === 'high'),
+    [findings]
+  );
 
   useEffect(() => {
     const loadCurrentUpload = async () => {
       try {
         const currentUploadId = await indexedDBService.getCurrentUploadId();
         if (!currentUploadId) {
-          router.push('/');
+          dispatch({ type: 'set_load_state', loadState: 'missing' });
           return;
         }
 
         const upload = await indexedDBService.getUpload(currentUploadId);
         if (!upload) {
-          router.push('/');
+          dispatch({ type: 'set_load_state', loadState: 'notFound' });
           return;
         }
 
-        setCurrentUpload(upload);
-        setData(upload.data);
+        dispatch({ type: 'set_current_upload', currentUpload: upload });
+        dispatch({ type: 'set_data', data: upload.data });
+        dispatch({ type: 'set_load_state', loadState: 'ready' });
       } catch (error) {
         console.error('Failed to load current upload:', error);
-        router.push('/');
+        dispatch({ type: 'set_load_state', loadState: 'notFound' });
       }
     };
 
     loadCurrentUpload();
-  }, [router]);
+  }, []);
 
-  if (!data || !currentUpload) {
+  if (loadState === 'loading' || !data || !currentUpload) {
+    if (loadState === 'missing' || loadState === 'notFound') {
+      return (
+        <div className="max-w-6xl mx-auto space-y-6">
+          <Breadcrumb />
+          <Card className="p-6">
+            <p className="text-sm text-muted-foreground">
+              {loadState === 'notFound'
+                ? 'No data was found for the current upload.'
+                : 'No upload is available in your browser session. Upload a file first.'}
+            </p>
+            <div className="mt-4">
+              <Button variant="outline" onClick={() => router.push('/')}>
+                Upload IAM Data
+              </Button>
+            </div>
+          </Card>
+        </div>
+      );
+    }
+
     return (
       <div className="max-w-6xl mx-auto space-y-6">
         <Breadcrumb />
         <Skeleton className="h-10 w-48" />
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          {[...Array(4)].map((_, i) => (
-            <Skeleton key={i} className="h-24 w-full" />
-          ))}
-        </div>
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">{[...Array(4)].map((_, i) => <Skeleton key={i} className="h-24 w-full" />)}</div>
         <Skeleton className="h-12 w-full" />
         <Skeleton className="h-64 w-full" />
       </div>
     );
   }
 
-  const { users, roles, policies, groups } = data;
+  const users = Object.entries(data.users);
+  const roles = data.roles;
+  const policies = data.policies;
+  const groups = data.groups;
 
-  const filteredUsers = Object.entries(users).filter(([, user]) =>
-    user.UserName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    user.Arn.toLowerCase().includes(searchTerm.toLowerCase())
-  );
-
-  // Categorize roles into user-defined and AWS service roles
-  const categorizeRoles = (roles: Record<string, IAMRole>) => {
-    const userRoles: [string, IAMRole][] = [];
-    const serviceRoles: [string, IAMRole][] = [];
-    
-    Object.entries(roles).forEach(([roleId, role]) => {
-      // AWS service roles have pattern: arn:aws:iam::accountid:role/aws-service-role/service.amazonaws.com/rolename
-      if (role.Arn.includes('/aws-service-role/')) {
-        serviceRoles.push([roleId, role]);
-      } else {
-        userRoles.push([roleId, role]);
-      }
-    });
-    
-    return { userRoles, serviceRoles };
-  };
+  const filteredUsers = users.filter(([, user]) => {
+    const term = searchTerm.toLowerCase();
+    return user.UserName.toLowerCase().includes(term) || user.Arn.toLowerCase().includes(term);
+  });
 
   const { userRoles, serviceRoles } = categorizeRoles(roles);
-
-  const filteredUserRoles = userRoles.filter(([, role]) =>
-    role.RoleName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    role.Arn.toLowerCase().includes(searchTerm.toLowerCase())
-  );
-
-  const filteredServiceRoles = serviceRoles.filter(([, role]) =>
-    role.RoleName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    role.Arn.toLowerCase().includes(searchTerm.toLowerCase())
-  );
-
-  // Categorize policies into user-defined, AWS service role policies, and AWS managed policies
-  const categorizePolicies = (policies: Record<string, IAMPolicy>) => {
-    const userPolicies: [string, IAMPolicy][] = [];
-    const serviceRolePolicies: [string, IAMPolicy][] = [];
-    const managedPolicies: [string, IAMPolicy][] = [];
-    
-    Object.entries(policies).forEach(([policyId, policy]) => {
-      // AWS service role policies have pattern: arn:aws:iam::aws:policy/aws-service-role/policy name
-      // or arn:aws:iam::aws:policy/service-role/policy name
-      if (policy.Arn.includes('::aws:policy/aws-service-role/') || policy.Arn.includes(':policy/service-role/')) {
-        serviceRolePolicies.push([policyId, policy]);
-      }
-      // AWS managed policies have pattern: arn:aws:iam::aws:policy/policy-name (without service-role path)
-      else if (policy.Arn.includes('::aws:policy/') && !policy.Arn.includes('/aws-service-role/') && !policy.Arn.includes('/service-role/')) {
-        managedPolicies.push([policyId, policy]);
-      } else {
-        userPolicies.push([policyId, policy]);
-      }
-    });
-    
-    return { userPolicies, serviceRolePolicies, managedPolicies };
-  };
+  const filteredUserRoles = userRoles.filter(([, role]) => {
+    const term = searchTerm.toLowerCase();
+    return role.RoleName.toLowerCase().includes(term) || role.Arn.toLowerCase().includes(term);
+  });
+  const filteredServiceRoles = serviceRoles.filter(([, role]) => {
+    const term = searchTerm.toLowerCase();
+    return role.RoleName.toLowerCase().includes(term) || role.Arn.toLowerCase().includes(term);
+  });
 
   const { userPolicies, serviceRolePolicies, managedPolicies } = categorizePolicies(policies);
+  const filteredUserPolicies = userPolicies.filter(([, policy]) => {
+    const term = searchTerm.toLowerCase();
+    return policy.PolicyName.toLowerCase().includes(term) || policy.Arn.toLowerCase().includes(term);
+  });
+  const filteredServiceRolePolicies = serviceRolePolicies.filter(([, policy]) => {
+    const term = searchTerm.toLowerCase();
+    return policy.PolicyName.toLowerCase().includes(term) || policy.Arn.toLowerCase().includes(term);
+  });
+  const filteredManagedPolicies = managedPolicies.filter(([, policy]) => {
+    const term = searchTerm.toLowerCase();
+    return policy.PolicyName.toLowerCase().includes(term) || policy.Arn.toLowerCase().includes(term);
+  });
 
-  const filteredUserPolicies = userPolicies.filter(([, policy]) =>
-    policy.PolicyName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    policy.Arn.toLowerCase().includes(searchTerm.toLowerCase())
+  const filteredGroups = Object.entries(groups).filter(([, group]) => {
+    const term = searchTerm.toLowerCase();
+    return group.GroupName.toLowerCase().includes(term) || group.Arn.toLowerCase().includes(term);
+  });
+
+  return (
+    <DashboardContent
+      currentUpload={currentUpload}
+      data={data}
+      findings={findings}
+      highSeverityFindings={highSeverityFindings}
+      searchTerm={searchTerm}
+      activeTab={activeTab}
+      policyRiskMap={policyRiskMap}
+      filteredUsers={filteredUsers}
+      filteredUserRoles={filteredUserRoles}
+      filteredServiceRoles={filteredServiceRoles}
+      filteredUserPolicies={filteredUserPolicies}
+      filteredServiceRolePolicies={filteredServiceRolePolicies}
+      filteredManagedPolicies={filteredManagedPolicies}
+      filteredGroups={filteredGroups}
+      userRoles={userRoles}
+      serviceRoles={serviceRoles}
+      userPolicies={userPolicies}
+      serviceRolePolicies={serviceRolePolicies}
+      managedPolicies={managedPolicies}
+      totalUsers={users.length}
+      totalRoles={Object.keys(roles).length}
+      totalPolicies={Object.keys(policies).length}
+      totalGroups={Object.keys(groups).length}
+      onSearchTerm={(next) => dispatch({ type: 'set_search_term', searchTerm: next })}
+      onTabChange={(nextTab) => dispatch({ type: 'set_active_tab', activeTab: nextTab })}
+      onNavigateUpload={() => router.push('/')}
+      onNavigateFindings={() => router.push('/findings')}
+      onNavigateDiff={() => router.push('/diff')}
+    />
   );
+}
 
-  const filteredServiceRolePolicies = serviceRolePolicies.filter(([, policy]) =>
-    policy.PolicyName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    policy.Arn.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+type DashboardContentProps = {
+  currentUpload: { name: string; data: ProcessedIAMData };
+  data: ProcessedIAMData;
+  findings: Array<{ severity: string }>;
+  highSeverityFindings: Array<{ severity: string }>;
+  searchTerm: string;
+  activeTab: 'users' | 'roles' | 'policies' | 'groups';
+  policyRiskMap: Record<string, number>;
+  filteredUsers: [string, any][];
+  filteredUserRoles: [string, IAMRole][];
+  filteredServiceRoles: [string, IAMRole][];
+  filteredUserPolicies: [string, IAMPolicy][];
+  filteredServiceRolePolicies: [string, IAMPolicy][];
+  filteredManagedPolicies: [string, IAMPolicy][];
+  filteredGroups: [string, IAMGroup][];
+  userRoles: [string, IAMRole][];
+  serviceRoles: [string, IAMRole][];
+  userPolicies: [string, IAMPolicy][];
+  serviceRolePolicies: [string, IAMPolicy][];
+  managedPolicies: [string, IAMPolicy][];
+  totalUsers: number;
+  totalRoles: number;
+  totalPolicies: number;
+  totalGroups: number;
+  onSearchTerm: (value: string) => void;
+  onTabChange: (value: DashboardState['activeTab']) => void;
+  onNavigateUpload: () => void;
+  onNavigateFindings: () => void;
+  onNavigateDiff: () => void;
+};
 
-  const filteredManagedPolicies = managedPolicies.filter(([, policy]) =>
-    policy.PolicyName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    policy.Arn.toLowerCase().includes(searchTerm.toLowerCase())
-  );
-
-  const filteredGroups = Object.entries(groups).filter(([, group]) =>
-    group.GroupName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    group.Arn.toLowerCase().includes(searchTerm.toLowerCase())
-  );
-
+function DashboardContent({
+  currentUpload,
+  data,
+  findings,
+  highSeverityFindings,
+  searchTerm,
+  activeTab,
+  policyRiskMap,
+  filteredUsers,
+  filteredUserRoles,
+  filteredServiceRoles,
+  filteredUserPolicies,
+  filteredServiceRolePolicies,
+  filteredManagedPolicies,
+  filteredGroups,
+  userRoles,
+  serviceRoles,
+  userPolicies,
+  serviceRolePolicies,
+  managedPolicies,
+  totalUsers,
+  totalRoles,
+  totalPolicies,
+  totalGroups,
+  onSearchTerm,
+  onTabChange,
+  onNavigateUpload,
+  onNavigateFindings,
+  onNavigateDiff,
+}: DashboardContentProps) {
   return (
     <div className="max-w-6xl mx-auto space-y-6">
       <Breadcrumb />
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold">IAM Dashboard</h1>
-          <p className="text-muted-foreground">
-            Analyzing: {currentUpload.name}
-          </p>
-        </div>
-        <Button variant="outline" onClick={() => router.push('/')}>
-          Upload New File
-        </Button>
-      </div>
+      <DashboardHeader
+        uploadName={currentUpload.name}
+        onUpload={() => onNavigateUpload()}
+        onFindings={() => onNavigateFindings()}
+        onDiff={() => onNavigateDiff()}
+      />
 
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Users</CardTitle>
-            <Users className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{Object.keys(users).length}</div>
-          </CardContent>
-        </Card>
+      <DashboardStats
+        users={totalUsers}
+        roles={totalRoles}
+        policies={totalPolicies}
+        groups={totalGroups}
+        findings={findings.length}
+        highSeverityFindings={highSeverityFindings.length}
+      />
 
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Roles</CardTitle>
-            <Shield className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{Object.keys(roles).length}</div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Policies</CardTitle>
-            <FileText className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{Object.keys(policies).length}</div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Groups</CardTitle>
-            <UserCheck className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{Object.keys(groups).length}</div>
-          </CardContent>
-        </Card>
-      </div>
-
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
+      <Tabs
+        value={activeTab}
+        onValueChange={(nextTab) => onTabChange(nextTab as DashboardState['activeTab'])}
+        className="space-y-4"
+      >
         <TabsList className="grid w-full grid-cols-4">
           <TabsTrigger value="users">Users</TabsTrigger>
           <TabsTrigger value="roles">Roles</TabsTrigger>
@@ -233,486 +355,362 @@ export default function DashboardPage() {
         </TabsList>
 
         <TabsContent value="users" className="space-y-4">
-          <div className="flex items-center space-x-2">
-            <Search className="h-4 w-4 text-muted-foreground" />
-            <Input
-              placeholder="Search users..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="max-w-sm"
-            />
-          </div>
-          
-          <Card>
-            <CardHeader>
-              <CardTitle>Users</CardTitle>
-              <CardDescription>
-                {filteredUsers.length} of {Object.keys(users).length} users
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>User Name</TableHead>
-                    <TableHead>ARN</TableHead>
-                    <TableHead>Create Date</TableHead>
-                    <TableHead>Actions</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {filteredUsers.map(([userId, user]) => (
-                    <TableRow key={userId}>
-                      <TableCell className="font-medium">
-                        <CopyField value={user.UserName}>
-                          {user.UserName}
-                        </CopyField>
-                      </TableCell>
-                      <TableCell>
-                        <CopyField value={user.Arn} displayValue={truncateArn(user.Arn)} />
-                      </TableCell>
-                      <TableCell>
-                        <CopyField value={formatDateTime(user.CreateDate)}>
-                          {formatDateTime(user.CreateDate)}
-                        </CopyField>
-                      </TableCell>
-                      <TableCell>
-                        <Button 
-                          variant="outline" 
-                          size="sm"
-                          onClick={() => router.push(`/user/${userId}`)}
-                        >
-                          View Details
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </CardContent>
-          </Card>
+          <DashboardSearchInput searchTerm={searchTerm} placeholder="Search users..." onSearch={onSearchTerm} />
+          <EntitiesCard
+            title="Users"
+            count={filteredUsers.length}
+            total={Object.keys(data.users).length}
+          >
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>User Name</TableHead>
+                  <TableHead>ARN</TableHead>
+                  <TableHead>Create Date</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {filteredUsers.map(([userId, user]) => (
+                  <ClickableTableRow key={userId} href={`/user/${userId}`}>
+                    <TableCell className="font-medium">{user.UserName}</TableCell>
+                    <TableCell>
+                      <span className="font-mono text-sm">{truncateArn(user.Arn)}</span>
+                    </TableCell>
+                    <TableCell>{formatDateTime(user.CreateDate)}</TableCell>
+                  </ClickableTableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </EntitiesCard>
         </TabsContent>
 
         <TabsContent value="roles" className="space-y-6">
-          <div className="flex items-center space-x-2">
-            <Search className="h-4 w-4 text-muted-foreground" />
-            <Input
-              placeholder="Search roles..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="max-w-sm"
-            />
-          </div>
-          
-          {/* User-Defined Roles */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center space-x-2">
-                <Shield className="h-5 w-5" />
-                <span>User-Defined Roles</span>
-                <Badge variant="secondary">{userRoles.length}</Badge>
-              </CardTitle>
-              <CardDescription>
-                {filteredUserRoles.length} of {userRoles.length} user-defined roles
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {filteredUserRoles.length > 0 ? (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Role Name</TableHead>
-                      <TableHead>ARN</TableHead>
-                      <TableHead>Create Date</TableHead>
-                      <TableHead>Actions</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {filteredUserRoles.map(([roleId, role]) => (
-                      <TableRow key={roleId}>
-                        <TableCell className="font-medium">
-                          <CopyField value={role.RoleName}>
-                            {role.RoleName}
-                          </CopyField>
-                        </TableCell>
-                        <TableCell>
-                          <CopyField value={role.Arn} displayValue={truncateArn(role.Arn)} />
-                        </TableCell>
-                        <TableCell>
-                          <CopyField value={formatDateTime(role.CreateDate)}>
-                            {formatDateTime(role.CreateDate)}
-                          </CopyField>
-                        </TableCell>
-                        <TableCell>
-                          <Button 
-                            variant="outline" 
-                            size="sm"
-                            onClick={() => router.push(`/role/${roleId}`)}
-                          >
-                            View Details
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              ) : (
-                <div className="text-center py-8">
-                  <p className="text-muted-foreground">
-                    {searchTerm ? 'No user-defined roles match your search.' : 'No user-defined roles found.'}
-                  </p>
-                </div>
-              )}
-            </CardContent>
-          </Card>
+          <DashboardSearchInput searchTerm={searchTerm} placeholder="Search roles..." onSearch={onSearchTerm} />
+          <EntitiesCard
+            title="User-Defined Roles"
+            badge={userRoles.length}
+            count={filteredUserRoles.length}
+            total={userRoles.length}
+          >
+            <RoleTable rows={filteredUserRoles} />
+          </EntitiesCard>
 
-          {/* AWS Service Roles */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center space-x-2">
-                <Shield className="h-5 w-5" />
-                <span>AWS Service-Linked Roles</span>
-                <Badge variant="secondary">{serviceRoles.length}</Badge>
-              </CardTitle>
-              <CardDescription>
-                {filteredServiceRoles.length} of {serviceRoles.length} AWS service-linked roles
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {filteredServiceRoles.length > 0 ? (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Role Name</TableHead>
-                      <TableHead>ARN</TableHead>
-                      <TableHead>Create Date</TableHead>
-                      <TableHead>Actions</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {filteredServiceRoles.map(([roleId, role]) => (
-                      <TableRow key={roleId}>
-                        <TableCell className="font-medium">
-                          <CopyField value={role.RoleName}>
-                            {role.RoleName}
-                          </CopyField>
-                        </TableCell>
-                        <TableCell>
-                          <CopyField value={role.Arn} displayValue={truncateArn(role.Arn)} />
-                        </TableCell>
-                        <TableCell>
-                          <CopyField value={formatDateTime(role.CreateDate)}>
-                            {formatDateTime(role.CreateDate)}
-                          </CopyField>
-                        </TableCell>
-                        <TableCell>
-                          <Button 
-                            variant="outline" 
-                            size="sm"
-                            onClick={() => router.push(`/role/${roleId}`)}
-                          >
-                            View Details
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              ) : (
-                <div className="text-center py-8">
-                  <p className="text-muted-foreground">
-                    {searchTerm ? 'No AWS service roles match your search.' : 'No AWS service roles found.'}
-                  </p>
-                </div>
-              )}
-            </CardContent>
-          </Card>
+          <EntitiesCard
+            title="AWS Service-Linked Roles"
+            badge={serviceRoles.length}
+            count={filteredServiceRoles.length}
+            total={serviceRoles.length}
+          >
+            <RoleTable rows={filteredServiceRoles} />
+          </EntitiesCard>
         </TabsContent>
 
         <TabsContent value="policies" className="space-y-6">
-          <div className="flex items-center space-x-2">
-            <Search className="h-4 w-4 text-muted-foreground" />
-            <Input
-              placeholder="Search policies..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="max-w-sm"
-            />
-          </div>
-          
-          {/* User-Defined Policies */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center space-x-2">
-                <FileText className="h-5 w-5" />
-                <span>User-Defined Policies</span>
-                <Badge variant="secondary">{userPolicies.length}</Badge>
-              </CardTitle>
-              <CardDescription>
-                {filteredUserPolicies.length} of {userPolicies.length} user-defined policies
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {filteredUserPolicies.length > 0 ? (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Policy Name</TableHead>
-                      <TableHead>ARN</TableHead>
-                      <TableHead>Create Date</TableHead>
-                      <TableHead>Attachment Count</TableHead>
-                      <TableHead>Risk</TableHead>
-                      <TableHead>Actions</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {filteredUserPolicies.map(([policyId, policy]) => {
-                      const riskCount = policyRiskMap[policy.Arn] || 0;
-                      return (
-                      <TableRow key={policyId}>
-                        <TableCell className="font-medium">
-                          <CopyField value={policy.PolicyName}>
-                            {policy.PolicyName}
-                          </CopyField>
-                        </TableCell>
-                        <TableCell>
-                          <CopyField value={policy.Arn} displayValue={truncateArn(policy.Arn)} />
-                        </TableCell>
-                        <TableCell>
-                          <CopyField value={formatDateTime(policy.CreateDate)}>
-                            {formatDateTime(policy.CreateDate)}
-                          </CopyField>
-                        </TableCell>
-                        <TableCell>
-                          <Badge variant="secondary">{policy.AttachmentCount}</Badge>
-                        </TableCell>
-                        <TableCell>
-                          {riskCount > 0 ? (
-                            <Badge variant="destructive" className="text-xs">
-                              {riskCount} path{riskCount > 1 ? "s" : ""}
-                            </Badge>
-                          ) : (
-                            <span className="text-xs text-muted-foreground">None</span>
-                          )}
-                        </TableCell>
-                        <TableCell>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => router.push(`/policy/${policyId}`)}
-                          >
-                            View Details
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                      );
-                    })}
-                  </TableBody>
-                </Table>
-              ) : (
-                <div className="text-center py-8">
-                  <p className="text-muted-foreground">
-                    {searchTerm ? 'No user-defined policies match your search.' : 'No user-defined policies found.'}
-                  </p>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* AWS Service Role Policies */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center space-x-2">
-                <FileText className="h-5 w-5" />
-                <span>AWS Service Role Policies</span>
-                <Badge variant="secondary">{serviceRolePolicies.length}</Badge>
-              </CardTitle>
-              <CardDescription>
-                {filteredServiceRolePolicies.length} of {serviceRolePolicies.length} AWS service role policies
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {filteredServiceRolePolicies.length > 0 ? (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Policy Name</TableHead>
-                      <TableHead>ARN</TableHead>
-                      <TableHead>Create Date</TableHead>
-                      <TableHead>Attachment Count</TableHead>
-                      <TableHead>Actions</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {filteredServiceRolePolicies.map(([policyId, policy]) => (
-                      <TableRow key={policyId}>
-                        <TableCell className="font-medium">
-                          <CopyField value={policy.PolicyName}>
-                            {policy.PolicyName}
-                          </CopyField>
-                        </TableCell>
-                        <TableCell>
-                          <CopyField value={policy.Arn} displayValue={truncateArn(policy.Arn)} />
-                        </TableCell>
-                        <TableCell>
-                          <CopyField value={formatDateTime(policy.CreateDate)}>
-                            {formatDateTime(policy.CreateDate)}
-                          </CopyField>
-                        </TableCell>
-                        <TableCell>
-                          <Badge variant="secondary">{policy.AttachmentCount}</Badge>
-                        </TableCell>
-                        <TableCell>
-                          <Button 
-                            variant="outline" 
-                            size="sm"
-                            onClick={() => router.push(`/policy/${policyId}`)}
-                          >
-                            View Details
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              ) : (
-                <div className="text-center py-8">
-                  <p className="text-muted-foreground">
-                    {searchTerm ? 'No AWS service role policies match your search.' : 'No AWS service role policies found.'}
-                  </p>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          {/* AWS Managed Policies */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center space-x-2">
-                <FileText className="h-5 w-5" />
-                <span>AWS Managed Policies</span>
-                <Badge variant="secondary">{managedPolicies.length}</Badge>
-              </CardTitle>
-              <CardDescription>
-                {filteredManagedPolicies.length} of {managedPolicies.length} AWS managed policies
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {filteredManagedPolicies.length > 0 ? (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Policy Name</TableHead>
-                      <TableHead>ARN</TableHead>
-                      <TableHead>Create Date</TableHead>
-                      <TableHead>Attachment Count</TableHead>
-                      <TableHead>Actions</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {filteredManagedPolicies.map(([policyId, policy]) => (
-                      <TableRow key={policyId}>
-                        <TableCell className="font-medium">
-                          <CopyField value={policy.PolicyName}>
-                            {policy.PolicyName}
-                          </CopyField>
-                        </TableCell>
-                        <TableCell>
-                          <CopyField value={policy.Arn} displayValue={truncateArn(policy.Arn)} />
-                        </TableCell>
-                        <TableCell>
-                          <CopyField value={formatDateTime(policy.CreateDate)}>
-                            {formatDateTime(policy.CreateDate)}
-                          </CopyField>
-                        </TableCell>
-                        <TableCell>
-                          <Badge variant="secondary">{policy.AttachmentCount}</Badge>
-                        </TableCell>
-                        <TableCell>
-                          <Button 
-                            variant="outline" 
-                            size="sm"
-                            onClick={() => router.push(`/policy/${policyId}`)}
-                          >
-                            View Details
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              ) : (
-                <div className="text-center py-8">
-                  <p className="text-muted-foreground">
-                    {searchTerm ? 'No AWS managed policies match your search.' : 'No AWS managed policies found.'}
-                  </p>
-                </div>
-              )}
-            </CardContent>
-          </Card>
+          <DashboardSearchInput searchTerm={searchTerm} placeholder="Search policies..." onSearch={onSearchTerm} />
+      <PolicyListCard
+        title="User-Defined Policies"
+        badge={userPolicies.length}
+        count={filteredUserPolicies.length}
+        total={userPolicies.length}
+        policyRiskMap={policyRiskMap}
+        policies={filteredUserPolicies}
+        showRisk
+      />
+      <PolicyListCard
+        title="AWS Service Role Policies"
+        badge={serviceRolePolicies.length}
+        count={filteredServiceRolePolicies.length}
+        total={serviceRolePolicies.length}
+        policyRiskMap={policyRiskMap}
+        policies={filteredServiceRolePolicies}
+        showRisk={false}
+      />
+      <PolicyListCard
+        title="AWS Managed Policies"
+        badge={managedPolicies.length}
+        count={filteredManagedPolicies.length}
+        total={managedPolicies.length}
+        policyRiskMap={policyRiskMap}
+        policies={filteredManagedPolicies}
+        showRisk={false}
+      />
         </TabsContent>
 
         <TabsContent value="groups" className="space-y-4">
-          <div className="flex items-center space-x-2">
-            <Search className="h-4 w-4 text-muted-foreground" />
-            <Input
-              placeholder="Search groups..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="max-w-sm"
-            />
-          </div>
-          
-          <Card>
-            <CardHeader>
-              <CardTitle>Groups</CardTitle>
-              <CardDescription>
-                {filteredGroups.length} of {Object.keys(groups).length} groups
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Group Name</TableHead>
-                    <TableHead>ARN</TableHead>
-                    <TableHead>Create Date</TableHead>
-                    <TableHead>Actions</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {filteredGroups.map(([groupId, group]) => (
-                    <TableRow key={groupId}>
-                      <TableCell className="font-medium">
-                        <CopyField value={group.GroupName}>
-                          {group.GroupName}
-                        </CopyField>
-                      </TableCell>
-                      <TableCell>
-                        <CopyField value={group.Arn} displayValue={truncateArn(group.Arn)} />
-                      </TableCell>
-                      <TableCell>
-                        <CopyField value={formatDateTime(group.CreateDate)}>
-                          {formatDateTime(group.CreateDate)}
-                        </CopyField>
-                      </TableCell>
-                      <TableCell>
-                        <Button 
-                          variant="outline" 
-                          size="sm"
-                          onClick={() => router.push(`/group/${groupId}`)}
-                        >
-                          View Details
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </CardContent>
-          </Card>
+          <DashboardSearchInput searchTerm={searchTerm} placeholder="Search groups..." onSearch={onSearchTerm} />
+          <EntitiesCard title="Groups" count={filteredGroups.length} total={Object.keys(data.groups).length}>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Group Name</TableHead>
+                  <TableHead>ARN</TableHead>
+                  <TableHead>Create Date</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {filteredGroups.map(([groupId, group]) => (
+                  <ClickableTableRow key={groupId} href={`/group/${groupId}`}>
+                    <TableCell className="font-medium">{group.GroupName}</TableCell>
+                    <TableCell>
+                      <span className="font-mono text-sm">{truncateArn(group.Arn)}</span>
+                    </TableCell>
+                    <TableCell>{formatDateTime(group.CreateDate)}</TableCell>
+                  </ClickableTableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </EntitiesCard>
         </TabsContent>
       </Tabs>
     </div>
   );
-} 
+}
+
+function DashboardHeader({
+  uploadName,
+  onUpload,
+  onFindings,
+  onDiff,
+}: {
+  uploadName: string;
+  onUpload: () => void;
+  onFindings: () => void;
+  onDiff: () => void;
+}) {
+  return (
+    <div className="flex items-center justify-between">
+      <div>
+        <h1 className="text-3xl font-bold">IAM Dashboard</h1>
+        <p className="text-muted-foreground">Analyzing: {uploadName}</p>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        <Button variant="outline" onClick={onFindings}>
+          <ShieldAlert className="size-4 mr-2" />
+          Findings
+        </Button>
+        <Button variant="outline" onClick={onDiff}>
+          <GitCompare className="size-4 mr-2" />
+          Diff
+        </Button>
+        <Button variant="outline" onClick={onUpload}>
+          Upload New File
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function DashboardStats({
+  users,
+  roles,
+  policies,
+  groups,
+  findings,
+  highSeverityFindings,
+}: {
+  users: number;
+  roles: number;
+  policies: number;
+  groups: number;
+  findings: number;
+  highSeverityFindings: number;
+}) {
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between gap-y-0 pb-2">
+          <CardTitle className="text-sm font-medium">Users</CardTitle>
+          <Users className="size-4 text-muted-foreground" />
+        </CardHeader>
+        <CardContent>
+          <div className="text-2xl font-bold">{users}</div>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between gap-y-0 pb-2">
+          <CardTitle className="text-sm font-medium">Roles</CardTitle>
+          <Shield className="size-4 text-muted-foreground" />
+        </CardHeader>
+        <CardContent>
+          <div className="text-2xl font-bold">{roles}</div>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between gap-y-0 pb-2">
+          <CardTitle className="text-sm font-medium">Policies</CardTitle>
+          <FileText className="size-4 text-muted-foreground" />
+        </CardHeader>
+        <CardContent>
+          <div className="text-2xl font-bold">{policies}</div>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between gap-y-0 pb-2">
+          <CardTitle className="text-sm font-medium">Groups</CardTitle>
+          <UserCheck className="size-4 text-muted-foreground" />
+        </CardHeader>
+        <CardContent>
+          <div className="text-2xl font-bold">{groups}</div>
+        </CardContent>
+      </Card>
+      <Card className={highSeverityFindings > 0 ? 'border-destructive/40' : undefined}>
+        <CardHeader className="flex flex-row items-center justify-between gap-y-0 pb-2">
+          <CardTitle className="text-sm font-medium">Findings</CardTitle>
+          <ShieldAlert className="size-4 text-muted-foreground" />
+        </CardHeader>
+        <CardContent>
+          <div className="text-2xl font-bold">{findings}</div>
+          <p className="text-xs text-muted-foreground">{highSeverityFindings} critical/high</p>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function DashboardSearchInput({
+  searchTerm,
+  placeholder,
+  onSearch,
+}: {
+  searchTerm: string;
+  placeholder: string;
+  onSearch: (value: string) => void;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <Search className="size-4 text-muted-foreground" />
+      <Input
+        placeholder={placeholder}
+        value={searchTerm}
+        onChange={(event) => onSearch(event.target.value)}
+        className="max-w-sm"
+      />
+    </div>
+  );
+}
+
+function EntitiesCard({
+  title,
+  badge,
+  count,
+  total,
+  children,
+}: {
+  title: string;
+  badge?: number;
+  count: number;
+  total: number;
+  children: ReactNode;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <span>{title}</span>
+          {badge !== undefined && <Badge variant="secondary">{badge}</Badge>}
+        </CardTitle>
+        <CardDescription>
+          {count} of {total} {title.toLowerCase()}
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {count > 0 ? (
+          children
+        ) : (
+          <div className="text-center py-8">
+            <p className="text-muted-foreground">No items found.</p>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function RoleTable({ rows }: { rows: [string, IAMRole][] }) {
+  if (rows.length === 0) return null;
+
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Role Name</TableHead>
+          <TableHead>ARN</TableHead>
+          <TableHead>Create Date</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {rows.map(([roleId, role]) => (
+          <ClickableTableRow key={roleId} href={`/role/${roleId}`}>
+            <TableCell className="font-medium">{role.RoleName}</TableCell>
+            <TableCell>
+              <span className="font-mono text-sm">{truncateArn(role.Arn)}</span>
+            </TableCell>
+            <TableCell>{formatDateTime(role.CreateDate)}</TableCell>
+          </ClickableTableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+}
+
+function PolicyListCard({
+  title,
+  badge,
+  count,
+  total,
+  policies,
+  policyRiskMap,
+  showRisk,
+}: {
+  title: string;
+  badge: number;
+  count: number;
+  total: number;
+  policies: [string, IAMPolicy][];
+  policyRiskMap: Record<string, number>;
+  showRisk: boolean;
+}) {
+  return (
+    <EntitiesCard title={title} badge={badge} count={count} total={total}>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Policy Name</TableHead>
+            <TableHead>ARN</TableHead>
+            <TableHead>Create Date</TableHead>
+            <TableHead>Attachment Count</TableHead>
+            {showRisk && <TableHead>Risk</TableHead>}
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {policies.map(([policyId, policy]) => {
+            const riskCount = policyRiskMap[policy.Arn] || 0;
+            return (
+              <ClickableTableRow key={policyId} href={`/policy/${policyId}`}>
+                <TableCell className="font-medium">{policy.PolicyName}</TableCell>
+                <TableCell>
+                  <span className="font-mono text-sm">{truncateArn(policy.Arn)}</span>
+                </TableCell>
+                <TableCell>{formatDateTime(policy.CreateDate)}</TableCell>
+                <TableCell>
+                  <Badge variant="secondary">{policy.AttachmentCount}</Badge>
+                </TableCell>
+                {showRisk && (
+                  <TableCell>
+                    {riskCount > 0 ? (
+                      <Badge variant="destructive" className="text-xs">
+                        {riskCount} path{riskCount > 1 ? 's' : ''}
+                      </Badge>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">None</span>
+                    )}
+                  </TableCell>
+                )}
+              </ClickableTableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+    </EntitiesCard>
+  );
+}

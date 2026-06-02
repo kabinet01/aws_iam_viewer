@@ -6,14 +6,14 @@
     "dev": "next dev --turbopack",
     "build": "next build",
     "start": "cp -r .next/static .next/standalone/.next/static 2>/dev/null; node .next/standalone/server.js",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test": "vitest run"
   },
   "dependencies": {
     "@radix-ui/react-collapsible": "^1.1.11",
     "@radix-ui/react-dialog": "^1.1.14",
     "@radix-ui/react-label": "^2.1.7",
     "@radix-ui/react-select": "^2.2.5",
-    "@radix-ui/react-separator": "^1.1.7",
     "@radix-ui/react-slot": "^1.2.3",
     "@radix-ui/react-tabs": "^1.1.12",
     "@types/dagre": "^0.7.53",
@@ -41,6 +41,10 @@
     "js-yaml": "^4.1.1",
     "tailwindcss": "^4",
     "tw-animate-css": "^1.3.5",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^4.1.7"
+  },
+  "overrides": {
+    "postcss": "^8.5.15"
   }
 }

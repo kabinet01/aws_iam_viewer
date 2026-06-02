@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -12,76 +12,73 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Breadcrumb } from '@/components/breadcrumb';
 import { FileText, Upload, Trash2, Database } from 'lucide-react';
 import { formatDateTime, formatFileSize } from '@/lib/iam-utils';
-import { indexedDBService, UploadMetadata } from '@/lib/indexeddb';
+import { useUploads } from '@/hooks/use-uploads';
 import { toast } from 'sonner';
+
+export const metadata = {
+  title: "Uploaded Files",
+  description: "Manage previously uploaded IAM authorization detail files.",
+};
 
 
 
 export default function UploadsPage() {
-  const [uploads, setUploads] = useState<Record<string, UploadMetadata>>({});
-  const [currentUploadId, setCurrentUploadId] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const { uploads, currentUploadId, isLoading, error, setCurrentUpload, deleteUpload, reload } = useUploads();
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const router = useRouter();
 
-  useEffect(() => {
-    const loadUploads = async () => {
-      try {
-        setIsLoading(true);
-        const uploadsList = await indexedDBService.getAllUploads();
-        const uploadsMap: Record<string, UploadMetadata> = {};
-        
-        uploadsList.forEach(upload => {
-          uploadsMap[upload.id] = upload;
-        });
-        
-        setUploads(uploadsMap);
-        const currentId = await indexedDBService.getCurrentUploadId();
-        setCurrentUploadId(currentId);
-      } catch (error) {
-        console.error('Failed to load uploads:', error);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    loadUploads();
-  }, []);
-
   const handleSwitchUpload = async (uploadId: string) => {
+    setErrorMessage(null);
     try {
-      await indexedDBService.setCurrentUploadId(uploadId);
-      setCurrentUploadId(uploadId);
-      const name = uploads[uploadId]?.name || uploadId;
+      await setCurrentUpload(uploadId);
+      const name = uploads?.[uploadId]?.name || uploadId;
       toast.success(`Switched to: ${name}`);
       router.push('/dashboard');
     } catch (error) {
       console.error('Failed to switch upload:', error);
+      setErrorMessage('Failed to switch upload');
       toast.error('Failed to switch upload');
     }
   };
 
   const handleDeleteUpload = async (uploadId: string) => {
+    setErrorMessage(null);
     try {
-      const name = uploads[uploadId]?.name || uploadId;
-      await indexedDBService.deleteUpload(uploadId);
-
-      const updatedUploads = { ...uploads };
-      delete updatedUploads[uploadId];
-      setUploads(updatedUploads);
-
-      if (currentUploadId === uploadId) {
-        await indexedDBService.setCurrentUploadId(null);
-        setCurrentUploadId(null);
-      }
+      const name = uploads?.[uploadId]?.name || uploadId;
+      await deleteUpload(uploadId);
       toast.success(`Deleted: ${name}`);
     } catch (error) {
       console.error('Failed to delete upload:', error);
+      setErrorMessage('Failed to delete upload');
       toast.error('Failed to delete upload');
     }
   };
 
-  const sortedUploads = Object.entries(uploads).sort(([, a], [, b]) => 
+  const onRetry = async () => {
+    setErrorMessage(null);
+    await reload();
+  };
+
+  const shownError = errorMessage ?? error;
+
+  if (shownError) {
+    return (
+      <div className="max-w-6xl mx-auto space-y-6">
+        <Breadcrumb />
+        <div className="rounded-lg border border-dashed p-8 text-sm text-muted-foreground bg-muted/30">
+          {shownError}
+          <div className="mt-4">
+            <Button variant="outline" onClick={onRetry}>
+              Retry
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const sortedUploads = Object.entries(uploads ?? {}).sort(([, a], [, b]) => 
     new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime()
   );
 
@@ -111,20 +108,20 @@ export default function UploadsPage() {
         <div className="flex items-center justify-between">
           <h1 className="text-3xl font-bold">Uploaded Files</h1>
           <Button onClick={() => router.push('/')}>
-            <Upload className="h-4 w-4 mr-2" />
+            <Upload className="size-4 mr-2" />
             Upload New File
           </Button>
         </div>
 
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12">
-            <FileText className="h-12 w-12 text-muted-foreground mb-4" />
+            <FileText className="size-12 text-muted-foreground mb-4" />
             <h3 className="text-lg font-semibold mb-2">No uploaded files</h3>
             <p className="text-muted-foreground text-center mb-4">
               You haven&apos;t uploaded any IAM authorization details files yet.
             </p>
             <Button onClick={() => router.push('/')}>
-              <Upload className="h-4 w-4 mr-2" />
+              <Upload className="size-4 mr-2" />
               Upload Your First File
             </Button>
           </CardContent>
@@ -139,15 +136,15 @@ export default function UploadsPage() {
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold">Uploaded Files</h1>
         <Button onClick={() => router.push('/')}>
-          <Upload className="h-4 w-4 mr-2" />
+          <Upload className="size-4 mr-2" />
           Upload New File
         </Button>
       </div>
 
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center space-x-2">
-            <FileText className="h-5 w-5" />
+          <CardTitle className="flex items-center gap-2">
+            <FileText className="size-5" />
             <span>Your Uploads</span>
           </CardTitle>
           <CardDescription>
@@ -183,14 +180,14 @@ export default function UploadsPage() {
                     )}
                   </TableCell>
                   <TableCell>
-                    <div className="flex items-center space-x-2">
+                    <div className="flex items-center gap-2">
                       {currentUploadId !== uploadId && (
                         <Button
                           variant="outline"
                           size="sm"
                           onClick={() => handleSwitchUpload(uploadId)}
                         >
-                          <Database className="h-4 w-4 mr-1" />
+                          <Database className="size-4 mr-1" />
                           Switch
                         </Button>
                       )}
@@ -199,7 +196,7 @@ export default function UploadsPage() {
                         size="sm"
                         onClick={() => setDeleteConfirmId(uploadId)}
                       >
-                        <Trash2 className="h-4 w-4 mr-1" />
+                        <Trash2 className="size-4 mr-1" />
                         Delete
                       </Button>
                     </div>
@@ -213,9 +210,9 @@ export default function UploadsPage() {
 
       {currentUploadId && (
         <Alert>
-          <Database className="h-4 w-4" />
+          <Database className="size-4" />
           <AlertDescription>
-            <strong>Current active upload:</strong> {uploads[currentUploadId]?.name}
+            <strong>Current active upload:</strong> {uploads?.[currentUploadId]?.name}
             <Button
               variant="link"
               className="p-0 h-auto ml-2"
@@ -232,7 +229,7 @@ export default function UploadsPage() {
           <DialogHeader>
             <DialogTitle>Delete Upload</DialogTitle>
             <DialogDescription>
-              Are you sure you want to delete <strong>{uploads[deleteConfirmId || '']?.name || 'this upload'}</strong>?
+              Are you sure you want to delete <strong>{uploads?.[deleteConfirmId || '']?.name || 'this upload'}</strong>?
               This action cannot be undone.
             </DialogDescription>
           </DialogHeader>

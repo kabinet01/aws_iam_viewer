@@ -19,6 +19,7 @@ npm run dev              # Start dev server with Turbopack on http://localhost:3
 npm run build           # Build for production (outputs to standalone)
 npm run start           # Start production server
 npm run lint            # Run ESLint
+npm run test            # Run Vitest unit tests
 
 # Docker (run from repository root)
 cd ..
