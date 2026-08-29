@@ -97,6 +97,16 @@ export interface IAMGroup {
   }>;
 }
 
+export interface IAMInlinePolicy {
+  id: string;
+  PolicyName: string;
+  PolicyDocument: IAMPolicyDocument;
+  ownerType: 'user' | 'role' | 'group';
+  ownerId: string;
+  ownerName: string;
+  ownerArn: string;
+}
+
 export interface ProcessedIAMData {
   users: Record<string, IAMUser>;
   roles: Record<string, IAMRole>;
@@ -109,4 +119,4 @@ export interface RawIAMData {
   RoleDetailList: IAMRole[];
   Policies: IAMPolicy[];
   GroupDetailList: IAMGroup[];
-} 
+}

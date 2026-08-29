@@ -93,6 +93,29 @@ describe("analysis", () => {
     expect(findings.some((finding) => finding.severity === "critical")).toBe(true);
   });
 
+  it("attributes findings from inline policies to their owning principal", () => {
+    const data = baseData();
+    data.users.alice.AttachedManagedPolicies = [];
+    data.roles.ops.AttachedManagedPolicies = [];
+    data.users.alice.UserPolicyList = [
+      {
+        PolicyName: "inline-admin",
+        PolicyDocument: policyDocument("*", "*"),
+      },
+    ];
+
+    const finding = analyzeSecurityFindings(data).find(
+      (candidate) =>
+        candidate.title === "Administrative wildcard access" &&
+        candidate.source?.policyName === "inline-admin"
+    );
+
+    expect(finding?.entityType).toBe("user");
+    expect(finding?.entityName).toBe("alice");
+    expect(finding?.source?.policyType).toBe("inline");
+    expect(finding?.source?.policyName).toBe("inline-admin");
+  });
+
   it("computes effective permissions through assumable roles", () => {
     const effective = analyzeEffectivePermissions(baseData(), "user", "alice");
 

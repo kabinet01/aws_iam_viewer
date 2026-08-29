@@ -30,7 +30,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { ClickableTableRow } from '@/components/clickable-table-row';
 import { JSONViewer } from '@/components/ui/json-viewer';
 import { Input } from '@/components/ui/input';
-import { ProcessedIAMData, IAMUser, IAMRole, IAMPolicy, IAMGroup } from '@/lib/types';
+import { ProcessedIAMData, IAMUser, IAMRole, IAMPolicy, IAMGroup, IAMInlinePolicy } from '@/lib/types';
 import {
   AlertTriangle,
   Check,
@@ -48,6 +48,7 @@ import {
 } from 'lucide-react';
 import {
   formatDateTime,
+  collectInlinePolicies,
   findAttachedEntities,
   findAssumableRoles,
   findAssumableRolesForRole,
@@ -64,13 +65,15 @@ const nodeTypes = {
   group: { color: '#10B981', bgColor: '#D1FAE5' },
   role: { color: '#F59E0B', bgColor: '#FEF3C7' },
   policy: { color: '#EF4444', bgColor: '#FEE2E2' },
+  inlinePolicy: { color: '#DC2626', bgColor: '#FEE2E2' },
 } as const;
 
 type SelectedNodeType =
-  | {
-      type: 'user' | 'group' | 'role' | 'policy';
-      data: IAMUser | IAMGroup | IAMRole | IAMPolicy;
-    }
+  | { type: 'user'; data: IAMUser }
+  | { type: 'group'; data: IAMGroup }
+  | { type: 'role'; data: IAMRole }
+  | { type: 'policy'; data: IAMPolicy }
+  | { type: 'inlinePolicy'; data: IAMInlinePolicy }
   | null;
 
 type FilterTab = 'users' | 'groups' | 'roles' | 'policies';
@@ -181,9 +184,10 @@ type EntityCollection = {
   groups: IAMGroup[];
   roles: IAMRole[];
   policies: IAMPolicy[];
+  inlinePolicies: IAMInlinePolicy[];
 };
 
-function filterEntitiesBySearch<T extends IAMUser | IAMGroup | IAMRole | IAMPolicy>(entities: T[], searchQuery: string): T[] {
+function filterEntitiesBySearch<T extends IAMUser | IAMGroup | IAMRole | IAMPolicy | IAMInlinePolicy>(entities: T[], searchQuery: string): T[] {
   const query = searchQuery.trim().toLowerCase();
   if (!query) return entities;
 
@@ -194,8 +198,20 @@ function filterEntitiesBySearch<T extends IAMUser | IAMGroup | IAMRole | IAMPoli
       ('RoleName' in entity && entity.RoleName) ||
       ('PolicyName' in entity && entity.PolicyName) ||
       '';
-    return name.toLowerCase().includes(query);
+    const ownerName = 'ownerName' in entity ? entity.ownerName : '';
+    return name.toLowerCase().includes(query) || ownerName.toLowerCase().includes(query);
   });
+}
+
+function splitGraphEntityId(value: string): [string, string] {
+  const separatorIndex = value.indexOf('-');
+  return separatorIndex === -1
+    ? [value, '']
+    : [value.slice(0, separatorIndex), value.slice(separatorIndex + 1)];
+}
+
+function getInlinePolicyNodeId(policy: IAMInlinePolicy): string {
+  return `inlinePolicy-${policy.id}`;
 }
 
 function calculateNodeImportance(
@@ -203,15 +219,18 @@ function calculateNodeImportance(
   type: 'user' | 'group' | 'role' | 'policy'
 ): number {
   if (type === 'user') {
-    return (entity as IAMUser).AttachedManagedPolicies.length + (entity as IAMUser).GroupList.length;
+    const user = entity as IAMUser;
+    return user.AttachedManagedPolicies.length + user.UserPolicyList.length + user.GroupList.length;
   }
   if (type === 'role') {
-    return (entity as IAMRole).AttachedManagedPolicies.length;
+    const role = entity as IAMRole;
+    return role.AttachedManagedPolicies.length + role.RolePolicyList.length;
   }
   if (type === 'policy') {
     return (entity as IAMPolicy).AttachmentCount;
   }
-  return (entity as IAMGroup).AttachedManagedPolicies.length;
+  const group = entity as IAMGroup;
+  return group.AttachedManagedPolicies.length + group.GroupPolicyList.length;
 }
 
 function getLayoutedElements(nodes: Node[], edges: Edge[], direction = 'LR') {
@@ -285,6 +304,14 @@ function buildPolicyRiskMap(data: ProcessedIAMData | null) {
       riskMap[policy.PolicyId] = matches.length;
     }
   }
+
+  for (const policy of collectInlinePolicies(data)) {
+    const matches = analyzePolicyForPrivesc(policy.PolicyDocument);
+    if (matches.length > 0) {
+      riskMap[policy.id] = matches.length;
+    }
+  }
+
   return riskMap;
 }
 
@@ -293,19 +320,34 @@ function getRelatedEntities(iamData: ProcessedIAMData, filterType: string, filte
   const relatedGroups: IAMGroup[] = [];
   const relatedRoles: IAMRole[] = [];
   const relatedPolicies: IAMPolicy[] = [];
+  const relatedInlinePolicies: IAMInlinePolicy[] = [];
 
   const groupsByName = new Map(Object.values(iamData.groups).map((group) => [group.GroupName, group]));
   const policiesByArn = new Map(Object.values(iamData.policies).map((policy) => [policy.Arn, policy]));
+  const inlinePolicies = collectInlinePolicies(iamData);
+  const addInlinePoliciesForOwner = (ownerType: IAMInlinePolicy['ownerType'], ownerId: string) => {
+    inlinePolicies.forEach((policy) => {
+      if (
+        policy.ownerType === ownerType &&
+        policy.ownerId === ownerId &&
+        !relatedInlinePolicies.some((candidate) => candidate.id === policy.id)
+      ) {
+        relatedInlinePolicies.push(policy);
+      }
+    });
+  };
 
   if (filterType === 'user') {
     const selectedUser = iamData.users[filterEntityId];
     if (selectedUser) {
       relatedUsers.push(selectedUser);
+      addInlinePoliciesForOwner('user', selectedUser.UserId);
 
       selectedUser.GroupList.forEach((groupName) => {
         const group = groupsByName.get(groupName);
         if (group && !relatedGroups.some((candidate) => candidate.GroupId === group.GroupId)) {
           relatedGroups.push(group);
+          addInlinePoliciesForOwner('group', group.GroupId);
         }
       });
 
@@ -330,6 +372,7 @@ function getRelatedEntities(iamData: ProcessedIAMData, filterType: string, filte
         if (!relatedRoles.some((candidate) => candidate.RoleId === role.RoleId)) {
           relatedRoles.push(role);
         }
+        addInlinePoliciesForOwner('role', role.RoleId);
 
         role.AttachedManagedPolicies.forEach((policy) => {
           const policyObj = policiesByArn.get(policy.PolicyArn);
@@ -343,6 +386,7 @@ function getRelatedEntities(iamData: ProcessedIAMData, filterType: string, filte
     const selectedGroup = iamData.groups[filterEntityId];
     if (selectedGroup) {
       relatedGroups.push(selectedGroup);
+      addInlinePoliciesForOwner('group', selectedGroup.GroupId);
 
       Object.values(iamData.users).forEach((user) => {
         if (user.GroupList.includes(selectedGroup.GroupName)) {
@@ -366,6 +410,7 @@ function getRelatedEntities(iamData: ProcessedIAMData, filterType: string, filte
         if (!relatedRoles.some((candidate) => candidate.RoleId === role.RoleId)) {
           relatedRoles.push(role);
         }
+        addInlinePoliciesForOwner('role', role.RoleId);
 
         role.AttachedManagedPolicies.forEach((policy) => {
           const policyObj = policiesByArn.get(policy.PolicyArn);
@@ -383,6 +428,7 @@ function getRelatedEntities(iamData: ProcessedIAMData, filterType: string, filte
         if (!relatedUsers.some((candidate) => candidate.UserId === user.UserId)) {
           relatedUsers.push(user);
         }
+        addInlinePoliciesForOwner('user', user.UserId);
 
         user.AttachedManagedPolicies.forEach((policy) => {
           const policyObj = policiesByArn.get(policy.PolicyArn);
@@ -395,6 +441,7 @@ function getRelatedEntities(iamData: ProcessedIAMData, filterType: string, filte
           const group = groupsByName.get(groupName);
           if (group && !relatedGroups.some((candidate) => candidate.GroupId === group.GroupId)) {
             relatedGroups.push(group);
+            addInlinePoliciesForOwner('group', group.GroupId);
 
             group.AttachedManagedPolicies.forEach((policy) => {
               const policyObj = policiesByArn.get(policy.PolicyArn);
@@ -415,6 +462,18 @@ function getRelatedEntities(iamData: ProcessedIAMData, filterType: string, filte
       relatedGroups.push(...attachedEntities.groups);
       relatedRoles.push(...attachedEntities.roles);
     }
+  } else if (filterType === 'inlinePolicy') {
+    const selectedPolicy = inlinePolicies.find((policy) => policy.id === filterEntityId);
+    if (selectedPolicy) {
+      relatedInlinePolicies.push(selectedPolicy);
+      if (selectedPolicy.ownerType === 'user' && iamData.users[selectedPolicy.ownerId]) {
+        relatedUsers.push(iamData.users[selectedPolicy.ownerId]);
+      } else if (selectedPolicy.ownerType === 'group' && iamData.groups[selectedPolicy.ownerId]) {
+        relatedGroups.push(iamData.groups[selectedPolicy.ownerId]);
+      } else if (selectedPolicy.ownerType === 'role' && iamData.roles[selectedPolicy.ownerId]) {
+        relatedRoles.push(iamData.roles[selectedPolicy.ownerId]);
+      }
+    }
   }
 
   return {
@@ -422,6 +481,7 @@ function getRelatedEntities(iamData: ProcessedIAMData, filterType: string, filte
     groups: relatedGroups,
     roles: relatedRoles,
     policies: relatedPolicies,
+    inlinePolicies: relatedInlinePolicies,
   };
 }
 
@@ -441,6 +501,7 @@ function buildGraphData(args: {
   let groupsToShow = Object.values(data.groups);
   let rolesToShow = Object.values(data.roles);
   let policiesToShow = Object.values(data.policies);
+  let inlinePoliciesToShow = collectInlinePolicies(data);
 
   if (hideAWSPolicies) {
     policiesToShow = policiesToShow.filter((policy) => !policy.Arn.startsWith(AWS_MANAGED_POLICY_PREFIX));
@@ -451,20 +512,23 @@ function buildGraphData(args: {
     const allRelatedGroups = new Set<IAMGroup>();
     const allRelatedRoles = new Set<IAMRole>();
     const allRelatedPolicies = new Set<IAMPolicy>();
+    const allRelatedInlinePolicies = new Map<string, IAMInlinePolicy>();
 
     selectedFilters.forEach((filter) => {
-      const [filterType, filterEntityId] = filter.split('-', 2);
+      const [filterType, filterEntityId] = splitGraphEntityId(filter);
       const relatedEntities = getRelatedEntities(data, filterType, filterEntityId);
       relatedEntities.users.forEach((user) => allRelatedUsers.add(user));
       relatedEntities.groups.forEach((group) => allRelatedGroups.add(group));
       relatedEntities.roles.forEach((role) => allRelatedRoles.add(role));
       relatedEntities.policies.forEach((policy) => allRelatedPolicies.add(policy));
+      relatedEntities.inlinePolicies.forEach((policy) => allRelatedInlinePolicies.set(policy.id, policy));
     });
 
     usersToShow = Array.from(allRelatedUsers);
     groupsToShow = Array.from(allRelatedGroups);
     rolesToShow = Array.from(allRelatedRoles);
     policiesToShow = Array.from(allRelatedPolicies);
+    inlinePoliciesToShow = Array.from(allRelatedInlinePolicies.values());
 
     if (hideAWSPolicies) {
       policiesToShow = policiesToShow.filter((policy) => !policy.Arn.startsWith(AWS_MANAGED_POLICY_PREFIX));
@@ -563,6 +627,28 @@ function buildGraphData(args: {
     });
   });
 
+  inlinePoliciesToShow.forEach((policy) => {
+    const isRisky = (policyRiskMap[policy.id] || 0) > 0;
+    nodes.push({
+      id: getInlinePolicyNodeId(policy),
+      type: 'default',
+      position: { x: 0, y: 0 },
+      data: { label: getNodeLabel(`${policy.PolicyName} (inline)`, isRisky) },
+      style: {
+        background: nodeTypes.inlinePolicy.bgColor,
+        border: `2px dashed ${isRisky ? '#DC2626' : nodeTypes.inlinePolicy.color}`,
+        borderRadius: '6px',
+        width: 280,
+        height: 60,
+        fontSize: '12px',
+        cursor: 'pointer',
+        boxShadow: isRisky ? '0 0 8px rgba(220, 38, 38, 0.4)' : undefined,
+      },
+      sourcePosition: Position.Right,
+      targetPosition: Position.Left,
+    });
+  });
+
   if (relationshipFilters.groupMemberships) {
     usersToShow.forEach((user) => {
       user.GroupList.forEach((groupName) => {
@@ -629,6 +715,30 @@ function buildGraphData(args: {
     rolesToShow.forEach((role) => {
       role.AttachedManagedPolicies.forEach((policy) => addPolicyEdge('role', role.RoleId, policy.PolicyArn));
     });
+
+    inlinePoliciesToShow.forEach((policy) => {
+      const edgeId = `${policy.ownerType}-${policy.ownerId}-inlinePolicy-${policy.id}`;
+      const isHighlighted = highlightedEdgeSet.has(edgeId);
+      edges.push({
+        id: edgeId,
+        source: `${policy.ownerType}-${policy.ownerId}`,
+        target: getInlinePolicyNodeId(policy),
+        type: 'smoothstep',
+        animated: false,
+        style: {
+          stroke: isHighlighted ? '#FF6B6B' : '#DC2626',
+          strokeWidth: isHighlighted ? 2.5 : 1.5,
+          strokeDasharray: '5 4',
+        },
+        markerEnd: {
+          type: MarkerType.ArrowClosed,
+          color: isHighlighted ? '#FF6B6B' : '#DC2626',
+          width: 16,
+          height: 16,
+        },
+        data: { label: 'inline policy', type: 'policyAttachment' },
+      });
+    });
   }
 
   if (relationshipFilters.roleAssumptions) {
@@ -692,18 +802,21 @@ function buildGraphData(args: {
 
 function getSelectedNodeName(selectedNode: SelectedNodeType) {
   if (!selectedNode) return '';
-  if (selectedNode.type === 'user') return (selectedNode.data as IAMUser).UserName;
-  if (selectedNode.type === 'group') return (selectedNode.data as IAMGroup).GroupName;
-  if (selectedNode.type === 'role') return (selectedNode.data as IAMRole).RoleName;
-  return (selectedNode.data as IAMPolicy).PolicyName;
+  if (selectedNode.type === 'user') return selectedNode.data.UserName;
+  if (selectedNode.type === 'group') return selectedNode.data.GroupName;
+  if (selectedNode.type === 'role') return selectedNode.data.RoleName;
+  return selectedNode.data.PolicyName;
 }
 
 function getSelectedNodeHref(selectedNode: SelectedNodeType) {
   if (!selectedNode) return '';
-  if (selectedNode.type === 'user') return `/user/${(selectedNode.data as IAMUser).UserId}`;
-  if (selectedNode.type === 'group') return `/group/${(selectedNode.data as IAMGroup).GroupId}`;
-  if (selectedNode.type === 'role') return `/role/${(selectedNode.data as IAMRole).RoleId}`;
-  return `/policy/${(selectedNode.data as IAMPolicy).PolicyId}`;
+  if (selectedNode.type === 'user') return `/user/${selectedNode.data.UserId}`;
+  if (selectedNode.type === 'group') return `/group/${selectedNode.data.GroupId}`;
+  if (selectedNode.type === 'role') return `/role/${selectedNode.data.RoleId}`;
+  if (selectedNode.type === 'inlinePolicy') {
+    return `/${selectedNode.data.ownerType}/${selectedNode.data.ownerId}`;
+  }
+  return `/policy/${selectedNode.data.PolicyId}`;
 }
 
 function useGraphPageState() {
@@ -727,6 +840,7 @@ function useGraphPageState() {
 
   const policyIdByArn = useMemo(() => buildPolicyIdByArn(data), [data]);
   const policyRiskMap = useMemo(() => buildPolicyRiskMap(data), [data]);
+  const inlinePolicies = useMemo(() => (data ? collectInlinePolicies(data) : []), [data]);
 
   const filteredEntitiesByTab = useMemo(() => {
     if (!data) {
@@ -735,6 +849,7 @@ function useGraphPageState() {
         groups: [] as IAMGroup[],
         roles: [] as IAMRole[],
         policies: [] as IAMPolicy[],
+        inlinePolicies: [] as IAMInlinePolicy[],
       };
     }
 
@@ -747,8 +862,9 @@ function useGraphPageState() {
       groups: filterEntitiesBySearch(Object.values(data.groups), searchQuery),
       roles: filterEntitiesBySearch(Object.values(data.roles), searchQuery),
       policies: filterEntitiesBySearch(policies, searchQuery),
+      inlinePolicies: filterEntitiesBySearch(inlinePolicies, searchQuery),
     };
-  }, [data, hideAWSPolicies, searchQuery]);
+  }, [data, hideAWSPolicies, inlinePolicies, searchQuery]);
 
   const entityCounts = useMemo(() => {
     if (!data) return { users: 0, groups: 0, roles: 0, policies: 0 };
@@ -757,10 +873,10 @@ function useGraphPageState() {
       groups: Object.keys(data.groups).length,
       roles: Object.keys(data.roles).length,
       policies: hideAWSPolicies
-        ? Object.values(data.policies).filter((policy) => !policy.Arn.startsWith(AWS_MANAGED_POLICY_PREFIX)).length
-        : Object.keys(data.policies).length,
+        ? Object.values(data.policies).filter((policy) => !policy.Arn.startsWith(AWS_MANAGED_POLICY_PREFIX)).length + inlinePolicies.length
+        : Object.keys(data.policies).length + inlinePolicies.length,
     };
-  }, [data, hideAWSPolicies]);
+  }, [data, hideAWSPolicies, inlinePolicies]);
 
   const onConnect = useCallback(
     (params: Parameters<typeof addEdge>[0]) => setEdges((currentEdges) => addEdge(params, currentEdges)),
@@ -791,7 +907,7 @@ function useGraphPageState() {
       }
       dispatch({ type: 'set_highlighted_edges', highlightedEdges: connectedEdgeIds });
 
-      const [nodeType, entityId] = node.id.split('-', 2);
+      const [nodeType, entityId] = splitGraphEntityId(node.id);
       let nextSelectedNode: SelectedNodeType = null;
 
       if (nodeType === 'user' && data.users[entityId]) {
@@ -802,6 +918,11 @@ function useGraphPageState() {
         nextSelectedNode = { type: 'role', data: data.roles[entityId] };
       } else if (nodeType === 'policy' && data.policies[entityId]) {
         nextSelectedNode = { type: 'policy', data: data.policies[entityId] };
+      } else if (nodeType === 'inlinePolicy') {
+        const inlinePolicy = inlinePolicies.find((policy) => policy.id === entityId);
+        if (inlinePolicy) {
+          nextSelectedNode = { type: 'inlinePolicy', data: inlinePolicy };
+        }
       }
 
       if (nextSelectedNode) {
@@ -809,7 +930,7 @@ function useGraphPageState() {
         dispatch({ type: 'set_modal_open', isModalOpen: true });
       }
     },
-    [data, edges]
+    [data, edges, inlinePolicies]
   );
 
   useEffect(() => {
@@ -1177,6 +1298,7 @@ function GraphControlPanel(props: {
     groups: IAMGroup[];
     roles: IAMRole[];
     policies: IAMPolicy[];
+    inlinePolicies: IAMInlinePolicy[];
   };
   selectedFilters: string[];
   isFilterOpen: boolean;
@@ -1273,6 +1395,7 @@ function EntityFilterControl(props: {
     groups: IAMGroup[];
     roles: IAMRole[];
     policies: IAMPolicy[];
+    inlinePolicies: IAMInlinePolicy[];
   };
   selectedFilters: string[];
   currentSelectionLabel: string;
@@ -1424,6 +1547,9 @@ function EntityFilterControl(props: {
                 />
               </TabsContent>
               <TabsContent value="policies" className="mt-4">
+                <p className="px-2 pb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Managed policies
+                </p>
                 <EntitySelectionList
                   prefix="policy"
                   items={filteredEntitiesByTab.policies}
@@ -1431,6 +1557,19 @@ function EntityFilterControl(props: {
                   emptyMessage={searchQuery ? 'No policies found matching your search.' : 'No policies available.'}
                   getId={(policy) => policy.PolicyId}
                   getLabel={(policy) => policy.PolicyName}
+                  onToggleFilter={onToggleFilter}
+                  onSelectFilters={onSelectFilters}
+                />
+                <p className="px-2 pb-1 pt-4 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Inline policies
+                </p>
+                <EntitySelectionList
+                  prefix="inlinePolicy"
+                  items={filteredEntitiesByTab.inlinePolicies}
+                  selectedFilters={selectedFilters}
+                  emptyMessage={searchQuery ? 'No inline policies found matching your search.' : 'No inline policies available.'}
+                  getId={(policy) => policy.id}
+                  getLabel={(policy) => `${policy.PolicyName} (${policy.ownerName})`}
                   onToggleFilter={onToggleFilter}
                   onSelectFilters={onSelectFilters}
                 />
@@ -1453,7 +1592,7 @@ function EntitySelectionList<T>({
   onToggleFilter,
   onSelectFilters,
 }: {
-  prefix: 'user' | 'group' | 'role' | 'policy';
+  prefix: 'user' | 'group' | 'role' | 'policy' | 'inlinePolicy';
   items: T[];
   selectedFilters: string[];
   emptyMessage: string;
@@ -1465,6 +1604,8 @@ function EntitySelectionList<T>({
   const itemValues = items.map((item) => `${prefix}-${getId(item)}`);
   const currentPrefixFilters = selectedFilters.filter((filter) => filter.startsWith(`${prefix}-`));
   const allSelected = itemValues.length > 0 && itemValues.every((value) => selectedFilters.includes(value));
+  const singularLabel = prefix === 'inlinePolicy' ? 'inline policy' : prefix === 'policy' ? 'managed policy' : prefix;
+  const pluralLabel = singularLabel.endsWith('policy') ? `${singularLabel.slice(0, -1)}ies` : `${singularLabel}s`;
 
   const handleToggleAll = () => {
     const otherFilters = selectedFilters.filter((filter) => !filter.startsWith(`${prefix}-`));
@@ -1474,7 +1615,7 @@ function EntitySelectionList<T>({
   return (
     <div className="space-y-1 max-h-[400px] overflow-y-auto">
       <div className="flex items-center justify-between pb-2 border-b">
-        <span className="text-sm font-medium">{items.length} {prefix}{items.length === 1 ? '' : 's'}</span>
+        <span className="text-sm font-medium">{items.length} {items.length === 1 ? singularLabel : pluralLabel}</span>
         {items.length > 0 && (
           <Button variant="ghost" size="sm" onClick={handleToggleAll} className="text-xs">
             {allSelected && currentPrefixFilters.length === itemValues.length ? 'Deselect All' : 'Select All'}
@@ -1526,7 +1667,7 @@ function RelationshipFilterControl({
           id="policyAttachments"
           checked={relationshipFilters.policyAttachments}
           onCheckedChange={(checked) => onChange({ ...relationshipFilters, policyAttachments: checked })}
-          label="Policy Attachments"
+          label="Policy Relationships"
           swatchClassName="bg-[#EF4444]"
         />
         <GraphCheckbox
@@ -1612,9 +1753,10 @@ function GraphCheckbox({
 }
 
 function GraphLegend({ data, hideAWSPolicies }: { data: ProcessedIAMData; hideAWSPolicies: boolean }) {
-  const policyCount = hideAWSPolicies
+  const managedPolicyCount = hideAWSPolicies
     ? Object.values(data.policies).filter((policy) => !policy.Arn.startsWith(AWS_MANAGED_POLICY_PREFIX)).length
     : Object.keys(data.policies).length;
+  const inlinePolicyCount = collectInlinePolicies(data).length;
 
   return (
     <Card>
@@ -1625,19 +1767,21 @@ function GraphLegend({ data, hideAWSPolicies }: { data: ProcessedIAMData; hideAW
         <div className="space-y-4">
           <div>
             <h3 className="text-sm font-semibold mb-2">Entity Types</h3>
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
               <LegendNode label={`Users (${Object.keys(data.users).length})`} color={nodeTypes.user.color} bgColor={nodeTypes.user.bgColor} />
               <LegendNode label={`Groups (${Object.keys(data.groups).length})`} color={nodeTypes.group.color} bgColor={nodeTypes.group.bgColor} />
               <LegendNode label={`Roles (${Object.keys(data.roles).length})`} color={nodeTypes.role.color} bgColor={nodeTypes.role.bgColor} />
-              <LegendNode label={`Policies (${policyCount})`} color={nodeTypes.policy.color} bgColor={nodeTypes.policy.bgColor} />
+              <LegendNode label={`Managed Policies (${managedPolicyCount})`} color={nodeTypes.policy.color} bgColor={nodeTypes.policy.bgColor} />
+              <LegendNode label={`Inline Policies (${inlinePolicyCount})`} color={nodeTypes.inlinePolicy.color} bgColor={nodeTypes.inlinePolicy.bgColor} dashed />
             </div>
           </div>
 
           <div>
             <h3 className="text-sm font-semibold mb-2">Relationships</h3>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
               <LegendEdge label="Group Membership" color="#10B981" markerId="arrow-green" />
-              <LegendEdge label="Policy Attachment" color="#EF4444" markerId="arrow-red" />
+              <LegendEdge label="Managed Policy" color="#EF4444" markerId="arrow-red" />
+              <LegendEdge label="Inline Policy" color="#DC2626" markerId="arrow-inline-red" dashed />
               <LegendEdge label="Role Assumption" color="#8B5CF6" markerId="arrow-purple" />
             </div>
           </div>
@@ -1653,16 +1797,16 @@ function GraphLegend({ data, hideAWSPolicies }: { data: ProcessedIAMData; hideAW
   );
 }
 
-function LegendNode({ label, color, bgColor }: { label: string; color: string; bgColor: string }) {
+function LegendNode({ label, color, bgColor, dashed = false }: { label: string; color: string; bgColor: string; dashed?: boolean }) {
   return (
     <div className="flex items-center gap-2">
-      <div className="size-4 rounded border-2" style={{ backgroundColor: bgColor, borderColor: color }} />
+      <div className={`size-4 rounded border-2 ${dashed ? 'border-dashed' : ''}`} style={{ backgroundColor: bgColor, borderColor: color }} />
       <span className="text-sm">{label}</span>
     </div>
   );
 }
 
-function LegendEdge({ label, color, markerId }: { label: string; color: string; markerId: string }) {
+function LegendEdge({ label, color, markerId, dashed = false }: { label: string; color: string; markerId: string; dashed?: boolean }) {
   return (
     <div className="flex items-center gap-2">
       <svg width="60" height="20" className="flex-shrink-0">
@@ -1671,7 +1815,7 @@ function LegendEdge({ label, color, markerId }: { label: string; color: string; 
             <polygon points="0 0, 8 4, 0 8" fill={color} />
           </marker>
         </defs>
-        <line x1="0" y1="10" x2="52" y2="10" stroke={color} strokeWidth="1.5" markerEnd={`url(#${markerId})`} />
+        <line x1="0" y1="10" x2="52" y2="10" stroke={color} strokeWidth="1.5" strokeDasharray={dashed ? '5 4' : undefined} markerEnd={`url(#${markerId})`} />
       </svg>
       <span className="text-sm">{label}</span>
     </div>
@@ -1808,13 +1952,13 @@ function HoveredEdgeSummary({ hoveredEdge, edges }: { hoveredEdge: string; edges
 }
 
 function GraphStats({ nodes, edges }: { nodes: Node[]; edges: Edge[] }) {
-  const directPolicyAttachments = edges.filter((edge) => edge.data?.label === 'attached to').length;
+  const policyRelationships = edges.filter((edge) => edge.data?.type === 'policyAttachment').length;
   const groupMemberships = edges.filter((edge) => edge.data?.label === 'member of').length;
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
       <StatCard title="Total Relationships" value={edges.length} />
-      <StatCard title="Direct Policy Attachments" value={directPolicyAttachments} />
+      <StatCard title="Policy Relationships" value={policyRelationships} />
       <StatCard title="Group Memberships" value={groupMemberships} />
       <StatCard title="Total Entities" value={nodes.length} />
     </div>
@@ -1859,15 +2003,21 @@ function NodeDetailsDialog({
 
   const selectedName = getSelectedNodeName(selectedNode);
   const selectedHref = getSelectedNodeHref(selectedNode);
-  const isPolicy = selectedNode.type === 'policy';
+  const isManagedPolicy = selectedNode.type === 'policy';
+  const isInlinePolicy = selectedNode.type === 'inlinePolicy';
+  const isPolicy = isManagedPolicy || isInlinePolicy;
   const isUser = selectedNode.type === 'user';
   const isGroup = selectedNode.type === 'group';
   const isRole = selectedNode.type === 'role';
   const attachedPolicies = !isPolicy ? (selectedNode.data as IAMUser | IAMGroup | IAMRole).AttachedManagedPolicies : [];
   const tags = (isUser || isRole) ? (selectedNode.data as IAMUser | IAMRole).Tags || [] : [];
-  const policyDocument = isPolicy ? getDefaultPolicyDocument(selectedNode.data as IAMPolicy) : null;
+  const policyDocument = isManagedPolicy
+    ? getDefaultPolicyDocument(selectedNode.data as IAMPolicy)
+    : isInlinePolicy
+      ? (selectedNode.data as IAMInlinePolicy).PolicyDocument
+      : null;
   const privescMatches = isPolicy && policyDocument ? analyzePolicyForPrivesc(policyDocument) : [];
-  const attachedEntities = isPolicy ? findAttachedEntities((selectedNode.data as IAMPolicy).Arn, data) : null;
+  const attachedEntities = isManagedPolicy ? findAttachedEntities((selectedNode.data as IAMPolicy).Arn, data) : null;
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -1895,9 +2045,8 @@ function NodeDetailsDialog({
 
           {isPolicy && privescMatches.length > 0 && (
             <PolicyRiskAlert
-              policyId={(selectedNode.data as IAMPolicy).PolicyId}
               matches={privescMatches}
-              onOpenPolicy={(policyId) => onOpenPage(`/policy/${policyId}`)}
+              onOpenDetails={() => onOpenPage(selectedHref)}
             />
           )}
 
@@ -1947,8 +2096,41 @@ function NodeDetailsDialog({
 function BasicInformationCard({ selectedNode }: { selectedNode: SelectedNodeType }) {
   if (!selectedNode) return null;
 
+  if (selectedNode.type === 'inlinePolicy') {
+    const policy = selectedNode.data;
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Basic Information</CardTitle>
+        </CardHeader>
+        <CardContent className="grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div>
+            <div className="text-sm font-medium">Name</div>
+            <p className="text-sm">{policy.PolicyName}</p>
+          </div>
+          <div>
+            <div className="text-sm font-medium">Policy Type</div>
+            <Badge variant="secondary">Inline</Badge>
+          </div>
+          <div>
+            <div className="text-sm font-medium">Owner</div>
+            <p className="text-sm">{policy.ownerName}</p>
+          </div>
+          <div>
+            <div className="text-sm font-medium">Owner Type</div>
+            <p className="text-sm capitalize">{policy.ownerType}</p>
+          </div>
+          <div className="md:col-span-2">
+            <div className="text-sm font-medium">Owner ARN</div>
+            <p className="text-sm font-mono break-all">{policy.ownerArn}</p>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
   const isPolicy = selectedNode.type === 'policy';
-  const policy = isPolicy ? (selectedNode.data as IAMPolicy) : null;
+  const policy = isPolicy ? selectedNode.data : null;
 
   return (
     <Card>
@@ -1996,13 +2178,11 @@ function BasicInformationCard({ selectedNode }: { selectedNode: SelectedNodeType
 }
 
 function PolicyRiskAlert({
-  policyId,
   matches,
-  onOpenPolicy,
+  onOpenDetails,
 }: {
-  policyId: string;
   matches: ReturnType<typeof analyzePolicyForPrivesc>;
-  onOpenPolicy: (policyId: string) => void;
+  onOpenDetails: () => void;
 }) {
   return (
     <Alert variant="destructive">
@@ -2024,8 +2204,8 @@ function PolicyRiskAlert({
             </div>
           ))}
           {matches.length > 3 && (
-            <Button variant="ghost" size="sm" className="text-xs" onClick={() => onOpenPolicy(policyId)}>
-              View all {matches.length} paths on policy page <ExternalLink className="size-3 ml-1" />
+            <Button variant="ghost" size="sm" className="text-xs" onClick={onOpenDetails}>
+              View all {matches.length} paths <ExternalLink className="size-3 ml-1" />
             </Button>
           )}
         </div>
@@ -2231,9 +2411,12 @@ function TagsCard({ tags }: { tags: Array<{ Key: string; Value: string }> }) {
 }
 
 function getEntityNameFromFilterId(data: ProcessedIAMData, filterId: string) {
-  const [type, id] = filterId.split('-', 2);
+  const [type, id] = splitGraphEntityId(filterId);
   if (type === 'user') return data.users[id]?.UserName || filterId;
   if (type === 'group') return data.groups[id]?.GroupName || filterId;
   if (type === 'role') return data.roles[id]?.RoleName || filterId;
+  if (type === 'inlinePolicy') {
+    return collectInlinePolicies(data).find((policy) => policy.id === id)?.PolicyName || filterId;
+  }
   return data.policies[id]?.PolicyName || filterId;
 }

@@ -5,6 +5,7 @@ import {
   IAMRole,
   IAMPolicy,
   IAMGroup,
+  IAMInlinePolicy,
   IAMPolicyStatement,
   IAMValue,
 } from './types';
@@ -85,6 +86,44 @@ export function processAuthDetails(authDetails: RawIAMData): ProcessedIAMData {
   }
 
   return { users, roles, policies, groups };
+}
+
+export function collectInlinePolicies(data: ProcessedIAMData): IAMInlinePolicy[] {
+  const inlinePolicies: IAMInlinePolicy[] = [];
+
+  const addPolicies = (
+    ownerType: IAMInlinePolicy['ownerType'],
+    ownerId: string,
+    ownerName: string,
+    ownerArn: string,
+    policies: Array<{ PolicyName: string; PolicyDocument: IAMInlinePolicy['PolicyDocument'] }> | undefined
+  ) => {
+    for (const policy of policies || []) {
+      inlinePolicies.push({
+        id: `${ownerType}:${ownerId}:${policy.PolicyName}`,
+        PolicyName: policy.PolicyName,
+        PolicyDocument: policy.PolicyDocument,
+        ownerType,
+        ownerId,
+        ownerName,
+        ownerArn,
+      });
+    }
+  };
+
+  for (const user of Object.values(data.users)) {
+    addPolicies('user', user.UserId, user.UserName, user.Arn, user.UserPolicyList);
+  }
+
+  for (const role of Object.values(data.roles)) {
+    addPolicies('role', role.RoleId, role.RoleName, role.Arn, role.RolePolicyList);
+  }
+
+  for (const group of Object.values(data.groups)) {
+    addPolicies('group', group.GroupId, group.GroupName, group.Arn, group.GroupPolicyList);
+  }
+
+  return inlinePolicies;
 }
 
 export function validateAuthDetailsShape(value: unknown): string[] {
@@ -173,7 +212,7 @@ export function findAssumableRolesForRole(role: IAMRole, allRoles: Record<string
   for (const targetRole of Object.values(allRoles)) {
     // Skip the role itself
     if (targetRole.RoleId === role.RoleId) continue;
-    
+
     const assumeRolePolicy = targetRole.AssumeRolePolicyDocument;
     const statements = normalizeStatements(assumeRolePolicy?.Statement);
 
@@ -202,22 +241,22 @@ export function findAssumableRolesForRole(role: IAMRole, allRoles: Record<string
 export function findRoleAssumptionChain(role: IAMRole, allRoles: Record<string, IAMRole>): IAMRole[] {
   const chainRoles = new Set<IAMRole>();
   const visited = new Set<string>();
-  
+
   function traverseRole(roleId: string) {
     if (visited.has(roleId)) return;
     visited.add(roleId);
-    
+
     const currentRole = allRoles[roleId];
     if (!currentRole) return;
-    
+
     chainRoles.add(currentRole);
-    
+
     // Find roles that this role can assume (downstream)
     const assumableRoles = findAssumableRolesForRole(currentRole, allRoles);
     for (const assumableRole of assumableRoles) {
       traverseRole(assumableRole.RoleId);
     }
-    
+
     // Find roles that can assume this role (upstream)
     for (const otherRole of Object.values(allRoles)) {
       if (otherRole.RoleId !== roleId) {
@@ -228,7 +267,7 @@ export function findRoleAssumptionChain(role: IAMRole, allRoles: Record<string, 
       }
     }
   }
-  
+
   traverseRole(role.RoleId);
   return Array.from(chainRoles);
 }

@@ -25,15 +25,15 @@ export function Header() {
           {/* Logo */}
           <Link href="/" className="flex items-center gap-3 group">
             <div className="flex items-center gap-2">
-              <Shield className="size-5 text-amber-500" />
+              <Shield className="size-5 text-primary" />
               <span className="font-bold text-base tracking-tight">
                 <span className="text-foreground">IAM</span>
                 <span className="text-muted-foreground">_</span>
-                <span className="text-amber-500">VIEWER</span>
+                <span className="text-primary">VIEWER</span>
               </span>
             </div>
             {/* Terminal cursor */}
-            <span className="hidden sm:inline-block w-2 h-4 bg-amber-500 animate-pulse opacity-80" />
+            <span className="hidden sm:inline-block w-2 h-4 bg-primary animate-pulse opacity-80" />
           </Link>
 
           {/* Navigation */}
@@ -47,14 +47,14 @@ export function Header() {
                     size="sm"
                     className={`relative flex items-center gap-2 text-xs font-medium transition-all ${
                       isActive
-                        ? 'text-amber-500 bg-amber-500/10 hover:bg-amber-500/15'
+                        ? 'text-primary bg-primary/10 hover:bg-primary/15'
                         : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'
                     }`}
                   >
                     <Icon className="size-3.5" />
                     <span className="hidden sm:inline">{label}</span>
                     {isActive && (
-                      <span className="absolute bottom-1 left-2 right-2 h-[2px] bg-amber-500 rounded-full" />
+                      <span className="absolute bottom-1 left-2 right-2 h-[2px] bg-primary rounded-full" />
                     )}
                   </Button>
                 </Link>
@@ -70,7 +70,7 @@ export function Header() {
                 <Button
                   variant="outline"
                   size="sm"
-                  className="flex items-center gap-2 text-xs font-medium border-amber-500/30 text-amber-500 hover:bg-amber-500/10 hover:border-amber-500/50 transition-all"
+                  className="flex items-center gap-2 text-xs font-medium border-primary/30 text-primary hover:bg-primary/10 hover:border-primary/50 transition-all"
                 >
                   <Upload className="size-3.5" />
                   <span className="hidden sm:inline">Upload</span>
